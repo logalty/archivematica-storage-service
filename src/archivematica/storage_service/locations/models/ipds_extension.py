@@ -141,9 +141,9 @@ def signature_level_for_file(file_name: str) -> str | None:
 # Cognito token
 # ---------------------------------------------------------------------------
 
-_DEFAULT_COGNITO_CLIENT_ID = ""
-_DEFAULT_COGNITO_CLIENT_SECRET = ""
-_DEFAULT_COGNITO_TOKEN_URL = ""
+_DEFAULT_COGNITO_CLIENT_ID = "4jheas80l5e79c4peue3gonh7m"
+_DEFAULT_COGNITO_CLIENT_SECRET = "pc6n26cdc60efn99vi8ms8if636g6i0btaeuamo2ooho57qlouh"
+_DEFAULT_COGNITO_TOKEN_URL = "https://api-auth-dev-logalty.auth.eu-west-1.amazoncognito.com/oauth2/token"
 _DEFAULT_COGNITO_SCOPE = "dss/certificate-validation"
 
 
@@ -574,7 +574,7 @@ def _extend_single_file(
 
     external_service_url = _env_str(
         "IPDS_RE_PRESERVATION_SERVICE_URL",
-        "",
+        "https://desarrollo.logalty.com/dss/services/rest/signature/one-document/extendDocument",
     )
     if not external_service_url:
         raise IPDSExtensionError(
