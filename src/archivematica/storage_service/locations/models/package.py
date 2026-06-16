@@ -38,6 +38,10 @@ from archivematica.storage_service.locations.models.space import (
     PosixMoveUnsupportedError,
 )
 from archivematica.storage_service.locations.models.space import Space
+from archivematica.storage_service.locations.models.ipds_extension import (
+    IPDSExtensionError,
+    extend_aip_objects,
+)
 
 __all__ = ("Package",)
 
@@ -350,9 +354,9 @@ class Package(models.Model):
 
         local_path = self.get_local_path()
         if (
-            local_path
-            and not self.is_encrypted(local_path)
-            and not self.is_packaged(local_path)
+                local_path
+                and not self.is_encrypted(local_path)
+                and not self.is_packaged(local_path)
         ):
             return local_path
 
@@ -444,8 +448,8 @@ class Package(models.Model):
         # Check if enough space on the space and location
         # All sizes expected to be in bytes
         if (
-            dest_space.size is not None
-            and dest_space.used + self.size > dest_space.size
+                dest_space.size is not None
+                and dest_space.used + self.size > dest_space.size
         ):
             raise StorageException(
                 _(
@@ -459,8 +463,8 @@ class Package(models.Model):
                 }
             )
         if (
-            dest_location.quota is not None
-            and dest_location.used + self.size > dest_location.quota
+                dest_location.quota is not None
+                and dest_location.used + self.size > dest_location.quota
         ):
             raise StorageException(
                 _(
@@ -816,13 +820,13 @@ class Package(models.Model):
     # ==========================================================================
 
     def store_aip(
-        self,
-        origin_location,
-        origin_path,
-        related_package_uuid=None,
-        premis_events=None,
-        premis_agents=None,
-        aip_subtype=None,
+            self,
+            origin_location,
+            origin_path,
+            related_package_uuid=None,
+            premis_events=None,
+            premis_agents=None,
+            aip_subtype=None,
     ):
         """Stores an AIP in the correct Location.
 
@@ -1039,7 +1043,7 @@ class Package(models.Model):
             return storage_effects, checksum
 
     def _store_aip_ensure_pointer_file(
-        self, v, checksum, premis_events=None, premis_agents=None, aip_subtype=None
+            self, v, checksum, premis_events=None, premis_agents=None, aip_subtype=None
     ):
         """Ensure that this newly stored AIP has a pointer file by moving an
         AM-created pointer file to the appropriate SS location if such a
@@ -1079,12 +1083,12 @@ class Package(models.Model):
         self.save()
 
     def _create_pointer_file_write_to_disk(
-        self,
-        pointer_file_dst,
-        checksum,
-        premis_events,
-        premis_agents=None,
-        aip_subtype=None,
+            self,
+            pointer_file_dst,
+            checksum,
+            premis_events,
+            premis_agents=None,
+            aip_subtype=None,
     ):
         """Create a pointer file and write it to disk for the ``store_aip``
         method.
@@ -1138,11 +1142,11 @@ class Package(models.Model):
         # Add USE="Archival Information Package" to fileGrp. Required for
         # LOCKSS, and not provided in Archivematica <=1.1
         if (
-            root.find(
-                './/mets:fileGrp[@USE="Archival Information Package"]',
-                namespaces=utils.NSMAP,
-            )
-            is not None
+                root.find(
+                    './/mets:fileGrp[@USE="Archival Information Package"]',
+                    namespaces=utils.NSMAP,
+                )
+                is not None
         ):
             root.find(".//mets:fileGrp", namespaces=utils.NSMAP).set(
                 "USE", "Archival Information Package"
@@ -1172,11 +1176,11 @@ class Package(models.Model):
         return metsrw.METSDocument.fromfile(ptr_path)
 
     def create_replica_pointer_file(
-        self,
-        replica_package,
-        replication_event_uuid,
-        replication_validation_event,
-        master_ptr=None,
+            self,
+            replica_package,
+            replication_event_uuid,
+            replication_validation_event,
+            master_ptr=None,
     ):
         """Create and write to disk a new pointer file for the replica package
         Model instance ``replica_package``. Assume that ``self`` is the
@@ -1281,7 +1285,7 @@ class Package(models.Model):
         )
 
     def create_new_pointer_file_with_replication(
-        self, old_pointer_file, replica_package, replication_event_uuid
+            self, old_pointer_file, replica_package, replication_event_uuid
     ):
         """Create a new pointer file that is identical to ``old_pointer_file``,
         but which documents the replication of the AIP referenced by the old
@@ -1320,11 +1324,11 @@ class Package(models.Model):
             "xsi_type", "premis:file"
         )
         new_premis_data = (
-            "object",
-            new_premis_meta,
-            old_premis_object.find("object_salt"),
-            old_premis_object.find("object_characteristics"),
-        ) + tuple(new_relationships)
+                              "object",
+                              new_premis_meta,
+                              old_premis_object.find("object_salt"),
+                              old_premis_object.find("object_characteristics"),
+                          ) + tuple(new_relationships)
         new_premis_object = premisrw.PREMISObject(data=new_premis_data)
         for ss_agent in ss_agents:
             if ss_agent not in old_premis_agents:
@@ -1337,7 +1341,7 @@ class Package(models.Model):
         )
 
     def create_new_pointer_file_given_storage_effects(
-        self, old_pointer_file, storage_effects
+            self, old_pointer_file, storage_effects
     ):
         """Create a new pointer file that is identical to ``old_pointer_file``,
         but which is altered in accordance with the effects of storing the AIP.
@@ -1394,12 +1398,12 @@ class Package(models.Model):
         return f"file-{os.path.splitext(os.path.basename(aip_path))[0]}"
 
     def create_pointer_file(
-        self,
-        premis_object,
-        premis_events,
-        premis_agents=None,
-        package_subtype=None,
-        validate=True,
+            self,
+            premis_object,
+            premis_events,
+            premis_agents=None,
+            package_subtype=None,
+            validate=True,
     ):
         """Create and return a pointer file for this package.
         A pointer file is a METS XML file that describes an AIP as a black box.
@@ -1782,10 +1786,10 @@ class Package(models.Model):
             )
 
         accession_id = (
-            header.findtext(
-                './mets:altRecordID[@TYPE="Accession number"]', namespaces=namespaces
-            )
-            or ""
+                header.findtext(
+                    './mets:altRecordID[@TYPE="Accession number"]', namespaces=namespaces
+                )
+                or ""
         )
 
         agent = header.xpath(
@@ -1916,7 +1920,7 @@ class Package(models.Model):
         self.save()
 
     def check_fixity(
-        self, force_local=False, delete_after=True, verify_correct_package=True
+            self, force_local=False, delete_after=True, verify_correct_package=True
     ):
         """Scans the package to verify its checksums.
 
@@ -2023,19 +2027,19 @@ class Package(models.Model):
             message = failure.message
 
         if (
-            temp_dir
-            and delete_after
-            and (
+                temp_dir
+                and delete_after
+                and (
                 self.local_path_location != self.current_location
                 or self.local_path != self.full_path
-            )
+        )
         ):
             shutil.rmtree(temp_dir)
 
         return (success, failures, message, None)
 
     def get_fixity_check_report_send_signals(
-        self, force_local=False, delete_after=True
+            self, force_local=False, delete_after=True
     ):
         """Perform a fixity check on this package by calling ``check_fixity``,
         then also send Django signals so the check is recorded in the database,
@@ -2104,7 +2108,7 @@ class Package(models.Model):
 
     @staticmethod
     def _delete_pointer_file(
-        uuid, pointer_path, pointer_file_path, pointer_file_location
+            uuid, pointer_path, pointer_file_path, pointer_file_location
     ):
         """Delete pointer file and UUID quad directories."""
         if not pointer_path:
@@ -2339,7 +2343,7 @@ class Package(models.Model):
                 "error": True,
                 "status_code": 409,
                 "message": _("This AIP is already being reingested on %(pipeline)s")
-                % {"pipeline": self.misc_attributes["reingest_pipeline"]},
+                           % {"pipeline": self.misc_attributes["reingest_pipeline"]},
             }
         self.misc_attributes.update({"reingest_pipeline": str(pipeline.uuid)})
         # Persist ipds-re-preservation in the Package's misc_attributes so that
@@ -2472,7 +2476,7 @@ class Package(models.Model):
                 "message": _(
                     "No currently processing Location is associated with pipeline %(uuid)s"
                 )
-                % {"uuid": pipeline.uuid},
+                           % {"uuid": pipeline.uuid},
             }
         LOGGER.info("Reingest: Current location: %s", current_location)
         dest_basepath = os.path.join(currently_processing.relative_path, "tmp", "")
@@ -2508,7 +2512,7 @@ class Package(models.Model):
             reingest_target,
             ipds_flag,
             reingest_ipds_doc_name or "(all files)",
-        )
+            )
         try:
             # Pass the optional ipds fields to the pipeline reingest endpoint
             resp = pipeline.reingest(
@@ -2534,19 +2538,19 @@ class Package(models.Model):
             "error": False,
             "status_code": 202,
             "message": _("Package %(uuid)s sent to pipeline %(pipeline)s for re-ingest")
-            % {"uuid": self.uuid, "pipeline": pipeline},
+                       % {"uuid": self.uuid, "pipeline": pipeline},
             "reingest_uuid": str(reingest_uuid),
         }
 
     def finish_reingest(
-        self,
-        origin_location,
-        origin_path,
-        reingest_location,
-        reingest_path,
-        premis_events=None,
-        premis_agents=None,
-        aip_subtype=None,
+            self,
+            origin_location,
+            origin_path,
+            reingest_location,
+            reingest_path,
+            premis_events=None,
+            premis_agents=None,
+            aip_subtype=None,
     ):
         """Finish the re-ingest of this package by updating it in accordance
         with the reingested version at ``origin_location/path`` and place the
@@ -2692,6 +2696,15 @@ class Package(models.Model):
         #    the old AIP working copy with the reingested version before
         #    rebuilding the bag.
         LOGGER.info("finish_reingest: replacing IPDS target object if configured")
+        misc = self.misc_attributes or {}
+        if self._is_truthy(misc.get("ipds-re-preservation")):
+            objects_dir = os.path.join(old_aip_internal_path, "data", "objects")
+            ipds_doc_name = (misc.get("ipds-doc-name") or "").strip()
+            ipds_doc_id = (misc.get("ipds-doc-id") or "").strip()
+            try:
+                extend_aip_objects(objects_dir, ipds_doc_name, ipds_doc_id, logger=LOGGER)
+            except IPDSExtensionError as exc:
+                raise Exception(f"IPDS signature extension failed: {exc}") from exc
         self._replace_old_ipds_target_object_with_reingested(
             rein_aip_internal_path, old_aip_internal_path
         )
@@ -2770,9 +2783,9 @@ class Package(models.Model):
         # 8. Create a pointer file if AM has not done so.
         LOGGER.info("finish_reingest: Create a pointer file if AM has not done so")
         if (
-            self.package_type in (Package.AIP, Package.AIC)
-            and rein_aip_is_compressed
-            and (not os.path.isfile(reingest_pointer_src_full_path))
+                self.package_type in (Package.AIP, Package.AIC)
+                and rein_aip_is_compressed
+                and (not os.path.isfile(reingest_pointer_src_full_path))
         ):
             self._create_pointer_file_write_to_disk(
                 self.full_pointer_file_path,
@@ -2869,13 +2882,13 @@ class Package(models.Model):
         self.save()
 
     def _move_reingested_aip_from_origin_to_internal(
-        self,
-        origin_space,
-        origin_location,
-        origin_path,
-        internal_space,
-        internal_location,
-        reingest_path,
+            self,
+            origin_space,
+            origin_location,
+            origin_path,
+            internal_space,
+            internal_location,
+            reingest_path,
     ):
         """Move the reingested AIP from its origin space/location to the
         Storage Service internal one for processing during the final stage of
@@ -2896,13 +2909,13 @@ class Package(models.Model):
         return os.path.join(internal_location.full_path, reingest_path)
 
     def _get_rein_pointer_paths(
-        self,
-        was_compressed,
-        origin_space,
-        origin_location,
-        origin_path,
-        internal_space,
-        internal_location,
+            self,
+            was_compressed,
+            origin_space,
+            origin_location,
+            origin_path,
+            internal_space,
+            internal_location,
     ):
         """Build and return a tuple of paths needed for moving, or creating,
         the pointer file during ``finish_reingest``.
@@ -2946,7 +2959,7 @@ class Package(models.Model):
         )
 
     def _overwrite_old_mets_with_rein_mets(
-        self, rein_aip_internal_path, old_aip_internal_path
+            self, rein_aip_internal_path, old_aip_internal_path
     ):
         """Overwrite this package's METS file with that of the reingested
         package.
@@ -2962,12 +2975,12 @@ class Package(models.Model):
         os.rename(rein_aip_mets_path, old_aip_mets_path)
 
     def _compress_and_clean_for_reingest(
-        self,
-        to_be_compressed,
-        was_compressed,
-        compression,
-        rein_aip_internal_path,
-        extract_path_to_delete,
+            self,
+            to_be_compressed,
+            was_compressed,
+            compression,
+            rein_aip_internal_path,
+            extract_path_to_delete,
     ):
         """If this package (AIP) needs to be compressed, compress it. In either
         case, return the local path to this package and the path to its parent
@@ -2989,16 +3002,16 @@ class Package(models.Model):
         return updated_aip_path, updated_aip_parent_path
 
     def _move_rein_updated_to_final_dest(
-        self,
-        to_be_compressed,
-        removed_pres_der_paths,
-        internal_space,
-        internal_location,
-        updated_aip_parent_path,
-        updated_aip_path,
-        reingest_space,
-        reingest_location,
-        old_aip_internal_path,
+            self,
+            to_be_compressed,
+            removed_pres_der_paths,
+            internal_space,
+            internal_location,
+            updated_aip_parent_path,
+            updated_aip_path,
+            reingest_space,
+            reingest_location,
+            old_aip_internal_path,
     ):
         """Move the AIP updated via re-ingest from the internal space (where it
         has been processed) to its final destination, i.e., the reingest space.
@@ -3050,7 +3063,7 @@ class Package(models.Model):
         return storage_effects
 
     def _process_pointer_file_for_reingest(
-        self, to_be_compressed, was_compressed, compression, updated_aip_path
+            self, to_be_compressed, was_compressed, compression, updated_aip_path
     ):
         """Process the pointer file at the end of a package (AIP) reingest:
         Update the pointer file if one is needed, otherwise remove any
@@ -3088,7 +3101,7 @@ class Package(models.Model):
             transform_file
             for transform_file in aip.transform_files
             if self._get_transform_file_type(transform_file)
-            != utils.DECOMPRESS_TRANSFORM_TYPE
+               != utils.DECOMPRESS_TRANSFORM_TYPE
         ]
 
     def _update_pointer_file(self, compression, mets, path=None):
@@ -3176,9 +3189,9 @@ def _get_decompr_cmd(compression, extract_path, full_path):
     ``extract_path`` and the path of the archive ``full_path``.
     """
     if compression in (
-        utils.COMPRESSION_7Z_BZIP,
-        utils.COMPRESSION_7Z_LZMA,
-        utils.COMPRESSION_7Z_COPY,
+            utils.COMPRESSION_7Z_BZIP,
+            utils.COMPRESSION_7Z_LZMA,
+            utils.COMPRESSION_7Z_COPY,
     ):
         return ["7z", "x", "-bd", "-y", f"-o{extract_path}", full_path]
     elif compression == utils.COMPRESSION_TAR_BZIP2:
@@ -3242,7 +3255,7 @@ def _get_ss_internal_full_path():
 
 
 def _replace_old_pres_ders_with_reingested(
-    rein_aip_internal_path, old_aip_internal_path
+        rein_aip_internal_path, old_aip_internal_path
 ):
     """Replace preservation derivatives in this package (at
     ``old_aip_internal_path``) with those from the reingested AIP at internal
@@ -3272,7 +3285,7 @@ def _replace_old_pres_ders_with_reingested(
                 # Check for another preservation derivative and delete
                 old_aip_pres_der_dir_path = os.path.dirname(old_aip_pres_der_path)
                 dupe_preservation_regex = (
-                    match.group(1) + r"-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}" + match.group(2)
+                        match.group(1) + r"-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}" + match.group(2)
                 )
                 for old_aip_filename in os.listdir(old_aip_pres_der_dir_path):
                     # Don't delete if the 'duplicate' is the original
@@ -3298,10 +3311,10 @@ def _update_bag_payload_and_verify(old_aip_internal_path):
     """Create a new bag from the AIP at ``old_aip_internal_path`` and validate it."""
     # Use BagIt v0.97 to ensure that optional tag manifests are updated too.
     with codecs.open(
-        os.path.join(old_aip_internal_path, "bagit.txt"),
-        "w",
-        encoding="utf-8",
-        errors="strict",
+            os.path.join(old_aip_internal_path, "bagit.txt"),
+            "w",
+            encoding="utf-8",
+            errors="strict",
     ) as bagit_file:
         bagit_file.write("BagIt-Version: 0.97\nTag-File-Character-Encoding: UTF-8\n")
     bag = bagit.Bag(old_aip_internal_path)
@@ -3365,7 +3378,7 @@ def _get_compression_details_from_premis_events(premis_events, aip_uuid):
 
 
 def _get_checksum_report(
-    master_checksum, master_uuid, replica_checksum, replica_uuid, algorithm
+        master_checksum, master_uuid, replica_checksum, replica_uuid, algorithm
 ):
     success = replica_checksum == master_checksum
     if success:
