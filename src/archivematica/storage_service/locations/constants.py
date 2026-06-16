@@ -128,6 +128,11 @@ PROTOCOL = {
             "logalty_url",
             "logalty_user",
             "logalty_pass",
+            "s3_secret_access_key",
+            "s3_access_key_id",
+            "s3_endpoint_url",
+            "s3_region",
+            "s3_bucket",
         ],
     },
 }
