@@ -38,6 +38,10 @@ from archivematica.storage_service.locations.models.space import (
     PosixMoveUnsupportedError,
 )
 from archivematica.storage_service.locations.models.space import Space
+from archivematica.storage_service.locations.models.ipds_extension import (
+    IPDSExtensionError,
+    extend_aip_objects,
+)
 
 __all__ = ("Package",)
 
@@ -2692,6 +2696,15 @@ class Package(models.Model):
         #    the old AIP working copy with the reingested version before
         #    rebuilding the bag.
         LOGGER.info("finish_reingest: replacing IPDS target object if configured")
+        misc = self.misc_attributes or {}
+        if self._is_truthy(misc.get("ipds-re-preservation")):
+            objects_dir = os.path.join(old_aip_internal_path, "data", "objects")
+            ipds_doc_name = (misc.get("ipds-doc-name") or "").strip()
+            ipds_doc_id = (misc.get("ipds-doc-id") or "").strip()
+            try:
+                extend_aip_objects(objects_dir, ipds_doc_name, ipds_doc_id, logger=LOGGER)
+            except IPDSExtensionError as exc:
+                raise Exception(f"IPDS signature extension failed: {exc}") from exc
         self._replace_old_ipds_target_object_with_reingested(
             rein_aip_internal_path, old_aip_internal_path
         )
