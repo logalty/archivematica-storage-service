@@ -4,7 +4,6 @@ import traceback
 import requests
 import boto3
 import botocore
-import io
 import re
 import py7zr
 import tempfile
@@ -14,8 +13,6 @@ from .location import Location
 from django.utils.translation import gettext_lazy as _
 
 LOGGER = logging.getLogger(__name__)
-
-HEADERS = {"Accept": "application/json", "Content-Type": "application/json"}
 
 CONNECT_TIMEOUT = 30
 READ_TIMEOUT = 600
@@ -77,6 +74,9 @@ class Logalty(models.Model):
         """Browse a path in the storage."""
         LOGGER.info("📁 [BROWSE] Path: %s", path)
         pass
+
+    def _get_storage_prefix(self, is_dip: bool):
+        return "dip_storage" if is_dip else "aip_storage"
     # -----------------------
     # UUID PARSER
     # -----------------------
@@ -106,10 +106,15 @@ class Logalty(models.Model):
     # -----------------------
     def _ensure_bucket_exists(self):
         try:
+            LOGGER.info("🗑️ [_ensure_bucket_exists] Checking bucket existence: %s", self.s3_bucket)
             self.s3.meta.client.head_bucket(Bucket=self.s3_bucket)
             return
-        except botocore.exceptions.ClientError:
-            pass
+        except botocore.exceptions.ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+
+            # real access error → do NOT auto-create
+            if code in ("403", "AccessDenied"):
+                raise
 
         try:
             if self.s3_region == "us-east-1":
@@ -122,7 +127,7 @@ class Logalty(models.Model):
                     },
                 )
         except botocore.exceptions.ClientError as e:
-            code = e.response.get("Error", {}).get("Code")
+            code = e.response.get("Error", {}).get("Code", "")
             if code not in ("BucketAlreadyExists", "BucketAlreadyOwnedByYou"):
                 raise
 
@@ -147,7 +152,7 @@ class Logalty(models.Model):
             raise LogaltyRESTException("Delete failed", url=url, exc_info=True)
 
     # -----------------------
-    # UPLOAD + ENCRYPT
+    # UPLOAD + ENCRYPT (FIXED)
     # -----------------------
     def _upload_then_encrypt(self, file_path, s3_key, package=None, is_dip=False):
 
@@ -167,33 +172,39 @@ class Logalty(models.Model):
             if object_salt is not None:
                 meta["object_salt"] = str(object_salt)
 
-        upload_kwargs = {
-            "Fileobj": open(file_path, "rb"),
-            "Key": s3_key,
-        }
-
-        if meta:
-            upload_kwargs["ExtraArgs"] = {"Metadata": meta}
-
+        # ---------------- S3 UPLOAD SAFE ----------------
         try:
-            self.bucket.upload_fileobj(**upload_kwargs)
+            with open(file_path, "rb") as f:
+                upload_kwargs = {
+                    "Fileobj": f,
+                    "Key": s3_key,
+                }
+
+                if meta:
+                    upload_kwargs["ExtraArgs"] = {"Metadata": meta}
+
+                self.bucket.upload_fileobj(**upload_kwargs)
 
         except Exception as e:
             LOGGER.error("❌ S3 upload failed: %s", e)
-            raise RuntimeError(f"S3 upload failed: {e}") from e
+            raise LogaltyRESTException(f"S3 upload failed: {e}") from e
 
+        # ---------------- SPRING BOOT CALL ----------------
         try:
             endpoint = "/file/dip" if is_dip else "/file/aip"
             url = f"{self.logalty_url}{endpoint}"
 
-            payload = {"destination": s3_key, "filename": filename}
+            payload = {
+                "destination": s3_key,
+                "filename": filename,
+            }
 
             if user_id:
                 payload["user_id"] = user_id
             if object_salt:
                 payload["object_salt"] = object_salt
 
-            LOGGER.info("📡 Calling IPDS url %s payload=%s", url, payload)
+            LOGGER.info("📡 Calling IPDS Storage to upload AIP/DIP, url %s payload=%s", url, payload)
 
             r = requests.post(
                 url,
@@ -214,22 +225,25 @@ class Logalty(models.Model):
             except Exception as del_err:
                 LOGGER.error("❌ Rollback failed: %s", del_err)
 
-            raise RuntimeError(f"Encryption failed: {e}") from e
+            raise LogaltyRESTException(f"Encryption failed: {e}") from e
 
     # -----------------------
     # UPLOAD ENTRYPOINT
     # -----------------------
     def move_from_storage_service(self, source_path, destination_path, package=None):
-
-        package_type = getattr(package, "package_type", None)
-        is_dip = package_type == "DIP"
+        if package:
+            is_dip = getattr(package, "package_type", None) == "DIP"
+        else:
+            is_dip = self._resolve_package_type(package, source_path) == "DIP"
         archive_path = None
+
         LOGGER.info(
             "⬆️ Upload requested source=%s destination=%s package_type=%s",
             source_path,
             destination_path,
-            package_type,
+            getattr(package, "package_type", None),
         )
+
         try:
 
             # AIP already packaged
@@ -245,26 +259,20 @@ class Logalty(models.Model):
                 )
             # DIRECTORY
             elif os.path.isdir(source_path):
-                LOGGER.info(
-                    "📦 Compressing directory %s -> %s",
-                    source_path,
-                    archive_path,
-                )
                 fd, archive_path = tempfile.mkstemp(suffix=".7z")
                 os.close(fd)
+
+                LOGGER.info("📦 Compressing directory %s", source_path)
 
                 with py7zr.SevenZipFile(archive_path, "w") as archive:
                     archive.writeall(source_path, arcname=os.path.basename(source_path))
 
             # FILE
             elif os.path.isfile(source_path):
-                LOGGER.info(
-                    "📦 Compressing file %s -> %s",
-                    source_path,
-                    archive_path,
-                )
                 fd, archive_path = tempfile.mkstemp(suffix=".7z")
                 os.close(fd)
+
+                LOGGER.info("📦 Compressing file %s", source_path)
 
                 with py7zr.SevenZipFile(archive_path, "w") as archive:
                     archive.write(source_path, arcname=os.path.basename(source_path))
@@ -276,11 +284,13 @@ class Logalty(models.Model):
                 archive_path,
                 os.path.getsize(archive_path),
             )
-            s3_key = f"{destination_path.rstrip('/')}/{os.path.basename(archive_path)}"
-            LOGGER.info(
-                "☁️ Uploading archive to S3 key: %s",
-                s3_key,
-            )
+            storage_prefix = self._get_storage_prefix(is_dip)
+            clean_dest = destination_path.strip("/")
+
+            s3_key = f"{storage_prefix}/{clean_dest}/{os.path.basename(archive_path)}"
+
+            LOGGER.info("☁️ Uploading to S3 key: %s", s3_key)
+
             self._upload_then_encrypt(
                 archive_path,
                 s3_key,
@@ -290,8 +300,8 @@ class Logalty(models.Model):
             LOGGER.info(
                 "✅ Upload and encryption completed successfully"
             )
-
-        finally:
+        except Exception as exp:
+            LOGGER.error("❌ Upload failed: %s", exp)
             if archive_path and archive_path != source_path and os.path.exists(archive_path):
                 try:
                     os.remove(archive_path)
@@ -301,28 +311,65 @@ class Logalty(models.Model):
                     )
                 except Exception:
                     LOGGER.exception("Temp cleanup failed")
+            raise LogaltyRESTException(f"Upload failed: {exp}") from exp
 
+
+
+    def _resolve_package_type(self, package, source_path):
+        """
+        Returns: "AIP" or "DIP"
+        Priority:
+        1. package.package_type
+        2. fallback heuristic (7z + path rules)
+        """
+
+        # -------------------------
+        # 1. TRUST DATABASE FIRST
+        # -------------------------
+        package_type = getattr(package, "package_type", None)
+        if package_type in ("AIP", "DIP"):
+            return package_type
+
+        # -------------------------
+        # 2. FALLBACK: FILE TYPE HEURISTIC
+        # -------------------------
+        if source_path and source_path.endswith(".7z"):
+            # optional heuristic:
+            # you can improve this with folder naming rules
+            if "dip" in source_path.lower():
+                return "DIP"
+            return "AIP"
+
+        # -------------------------
+        # 3. DEFAULT SAFE VALUE
+        # -------------------------
+        return "AIP"
     # -----------------------
     # DOWNLOAD ENTRYPOINT
     # -----------------------
     def move_to_storage_service(self, src_path, dest_path, dest_space):
 
         package_uuid = self._extract_package_uuid(src_path)
-
+        package = None
         user_id = None
         object_salt = None
 
         if package_uuid:
             try:
                 from .package import Package
-                package = Package.objects.get(uuid=package_uuid)
-                if package.misc_attributes:
+                package = Package.objects.filter(uuid=package_uuid).first()
+
+                if package and package.misc_attributes:
                     user_id = package.misc_attributes.get("user_id")
                     object_salt = package.misc_attributes.get("object_salt")
+
             except Exception:
                 LOGGER.warning("Package lookup failed")
+
         LOGGER.info("⬇️ [DOWNLOAD] AIP/DIP from src: %s ➡ dest: %s", src_path, dest_path)
-        is_aip = src_path.endswith((".7z", ".zip", ".tar", ".gz"))
+        package_type = self._resolve_package_type(package, src_path)
+        is_dip = package_type == "DIP"
+        is_aip = not is_dip
 
         url = (
             f"{self.logalty_url}/file/download/aip"
@@ -358,16 +405,18 @@ class Logalty(models.Model):
                             f.write(chunk)
                 LOGGER.info("✅ AIP saved to %s", dest_path)
             else:
-                with tempfile.NamedTemporaryFile(suffix=".7z") as tmp:
+                with tempfile.NamedTemporaryFile(suffix=".7z", delete=False) as tmp:
                     for chunk in response.iter_content(1024 * 1024):
                         if chunk:
                             tmp.write(chunk)
-                    tmp.flush()
+                    tmp_path = tmp.name
                     LOGGER.info("✅ DIP extracted to %s", dest_path)
-                    with py7zr.SevenZipFile(tmp.name, "r") as archive:
-                        os.makedirs(dest_path, exist_ok=True)
-                        archive.extractall(path=dest_path)
+                with py7zr.SevenZipFile(tmp_path, "r") as archive:
+                    os.makedirs(dest_path, exist_ok=True)
+                    archive.extractall(path=dest_path)
+
+                os.remove(tmp_path)
 
         except Exception as e:
-            LOGGER.error("❌ HTTP request failed: %s", e)
+            LOGGER.error("❌ Download failed: %s", e)
             raise LogaltyRESTException(f"Download failed: {e}") from e

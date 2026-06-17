@@ -47,9 +47,6 @@ import time
 
 import requests
 
-from src.archivematica.archivematicaCommon.storageService import LOGGER
-
-
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
