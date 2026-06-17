@@ -8,21 +8,21 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="logalty",
             name="s3_endpoint_url",
+            preserve_default=False,
             field=models.CharField(
                 help_text=b"The URL for AWS S3 on which upload the files before encryption",
                 max_length=2048,
                 default="",
-                preserve_default=False,
             ),
         ),
         migrations.AddField(
             model_name="logalty",
             name="s3_region",
+            preserve_default=False,
             field=models.CharField(
                 help_text=b"The REGION for AWS S3 on which upload the files before encryption",
                 max_length=64,
                 default="",
-                preserve_default=False,
             ),
         ),
         migrations.AddField(
