@@ -47,6 +47,9 @@ import time
 
 import requests
 
+from src.archivematica.archivematicaCommon.storageService import LOGGER
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -483,9 +486,9 @@ def validate_signature_and_extract_period(
 
 def send_extension_event(
         doc_id: str,
-        period_dt: datetime.datetime,
-        headers: dict,
-        timeout: int,
+        period_dt: datetime.datetime | None = None,
+        headers: dict | None = None,
+        timeout: int = 30,
         hash_value: str | None = None,
         file_size: int | None = None,
         digest_algorithm: str | None = None,
@@ -498,20 +501,22 @@ def send_extension_event(
     if logger is None:
         logger = logging.getLogger(__name__)
 
-    if not doc_id or not period_dt:
-        logger.debug("[ipds] no doc_id or period_dt – skipping extension event")
+    if not doc_id:
+        logger.debug("[ipds] no doc_id – skipping extension event")
         return False
 
     event_url = _env_str(
         "IPDS_EXTENSION_EVENT_URL",
-        "",
+        "https://ipds-dev.logalty.com/services/api/event/signature/extension",
     )
     if not event_url:
         logger.warning("[ipds] IPDS_EXTENSION_EVENT_URL not configured; skipping extension event")
         return False
 
     req_headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    req_headers.update(headers)
+
+    if headers:
+        req_headers.update(headers)
 
     try:
         req_headers = _build_auth_headers(req_headers, logger)
@@ -520,8 +525,9 @@ def send_extension_event(
 
     payload: dict = {
         "ipdsDocId": str(doc_id),
-        "extensionPeriodMax": period_dt.isoformat(),
     }
+    if period_dt is not None:
+        payload["extensionPeriodMax"] = period_dt.isoformat()
     if hash_value:
         payload["hash"] = hash_value
     if file_size is not None:
@@ -686,6 +692,7 @@ def _extend_single_file(
         logger=logger,
     )
     if not sent:
+        logger.info("[ipds]❌❌ Error extension event not sent for '%s'", file_name)
         raise IPDSExtensionError(f"failed to send extension event for '{file_name}'")
 
 

@@ -41,6 +41,7 @@ from archivematica.storage_service.locations.models.space import Space
 from archivematica.storage_service.locations.models.ipds_extension import (
     IPDSExtensionError,
     extend_aip_objects,
+    send_extension_event,
 )
 
 __all__ = ("Package",)
@@ -2704,7 +2705,17 @@ class Package(models.Model):
             try:
                 extend_aip_objects(objects_dir, ipds_doc_name, ipds_doc_id, logger=LOGGER)
             except IPDSExtensionError as exc:
-                raise Exception(f"IPDS signature extension failed: {exc}") from exc
+                LOGGER.info("finish_reingest: ❌❌ IPDS signature extension failed for package %s: %s", self.uuid, exc)
+                #NO throw exception and call ipds event to log the failure, but continue with reingest
+                try:
+                    send_extension_event(doc_id=ipds_doc_id)
+                except Exception:
+                    LOGGER.exception(
+                        "finish_reingest: failed to send IPDS failure event for package %s",
+                        self.uuid,
+                    )
+                    # Continue reingest without re-raising
+
         self._replace_old_ipds_target_object_with_reingested(
             rein_aip_internal_path, old_aip_internal_path
         )
