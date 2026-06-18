@@ -184,6 +184,7 @@ class Logalty(models.Model):
                     upload_kwargs["ExtraArgs"] = {"Metadata": meta}
 
                 self.bucket.upload_fileobj(**upload_kwargs)
+                LOGGER.info("✅✅ S3 upload completed OK: %s", s3_key)
 
         except Exception as e:
             LOGGER.error("❌ S3 upload failed: %s", e)
@@ -204,7 +205,7 @@ class Logalty(models.Model):
             if object_salt:
                 payload["object_salt"] = object_salt
 
-            LOGGER.info("📡 Calling IPDS Storage to upload AIP/DIP, url %s payload=%s", url, payload)
+            LOGGER.info("📡 Calling IPDS Storage to encrypt AIP/DIP, url %s payload=%s", url, payload)
 
             r = requests.post(
                 url,
@@ -214,11 +215,11 @@ class Logalty(models.Model):
             )
             r.raise_for_status()
 
-            LOGGER.info("🔐 Encryption triggered: %s", s3_key)
+            LOGGER.info("🔐 Encryption triggered with s3 key: %s", s3_key)
             return s3_key
 
         except Exception as e:
-            LOGGER.error("❌ Spring Boot failed → rollback S3: %s", e)
+            LOGGER.error("❌ IPDS Failed to encrypt AIP/DIP → rollback S3: %s", e)
             try:
                 self.bucket.Object(s3_key).delete()
                 LOGGER.info("🗑️ Rollback OK: %s", s3_key)
