@@ -1673,8 +1673,8 @@ class PackageResource(ModelResource):
         processing_config = bundle.data.get("processing_config", "default")
 
         reingest_ipds_represervation = bundle.data["ipds-re-preservation"]
-        reingest_ipds_doc_name = bundle.data.get("ipds-doc-name", "").strip()
-        reingest_ipds_doc_id = bundle.data.get("ipds-doc-id", "").strip()
+        reingest_ipds_doc_name = (bundle.data.get("ipds-doc-name") or "").strip()
+        reingest_ipds_doc_id = (bundle.data.get("ipds-doc-id") or "").strip()
         LOGGER.info(
             "🔍  Received reingest_ipds_represervation: %s , SKIPPING FIXITY IF TRUE", reingest_ipds_represervation
         )
