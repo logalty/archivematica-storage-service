@@ -76,7 +76,7 @@ class Logalty(models.Model):
         pass
 
     def _get_storage_prefix(self, is_dip: bool):
-        return "dip_storage" if is_dip else "aip_storage"
+        return "ipds/dip_storage" if is_dip else "ipds/aip_storage"
     # -----------------------
     # UUID PARSER
     # -----------------------
@@ -288,7 +288,7 @@ class Logalty(models.Model):
             storage_prefix = self._get_storage_prefix(is_dip)
             clean_dest = destination_path.strip("/")
 
-            s3_key = f"{storage_prefix}/{clean_dest}/{os.path.basename(archive_path)}"
+            s3_key = f"{storage_prefix}/{clean_dest}"
 
             LOGGER.info("☁️ Uploading to S3 key: %s", s3_key)
 
