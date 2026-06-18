@@ -443,7 +443,7 @@ def validate_signature_and_extract_period(
         if validate_url == base_url.rstrip("/"):
             validate_url = base_url.rstrip("/") + "/dss/services/rest/validation/validateSignature"
     else:
-        validate_url = _env_str("IPDS_RE_PRESERVATION_VALIDATE_URL", "")
+        validate_url = _env_str("IPDS_RE_PRESERVATION_VALIDATE_URL", "https://desarrollo.logalty.com/dss/services/rest/validation/validateSignature")
 
     if not validate_url:
         logger.warning("[ipds] no validation URL configured; skipping signature validation")
