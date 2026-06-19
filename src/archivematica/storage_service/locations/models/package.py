@@ -2848,6 +2848,11 @@ class Package(models.Model):
         shutil.rmtree(updated_aip_parent_path)  # Delete working files
         LOGGER.info("finish_reingest: removed working directory %s", updated_aip_parent_path)
 
+        # 12. Run post store callbacks.
+        LOGGER.info("finish_reingest: Running post store callbacks for package %s", self.uuid)
+        self.run_post_store_callbacks()
+        LOGGER.info("finish_reingest: Post store callbacks OK for package %s", self.uuid)
+
     # ==========================================================================
     # Private methods for ``finish_reingest``
     # ==========================================================================
