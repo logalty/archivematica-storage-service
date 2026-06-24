@@ -2379,13 +2379,11 @@ class Package(models.Model):
 
         # Run fixity
         # Fixity will fetch & extract package if needed
-        if reingest_ipds_represervation.lower() == "false":
-            success, ___, error_msg, ___ = self.check_fixity(delete_after=False)
-            LOGGER.info("🔍 Reingest: Fixity response: %s, %s", success, error_msg)
-            if not success:
-                return {"error": True, "status_code": 500, "message": error_msg}
-        else:
-            LOGGER.info("🔍 Reingest: Skipping fixity check as reingest_ipds_represervation is set to true")
+        success, ___, error_msg, ___ = self.check_fixity(delete_after=False)
+        LOGGER.info("🔍 Reingest: Fixity response: %s, %s", success, error_msg)
+        if not success:
+            return {"error": True, "status_code": 500, "message": error_msg}
+
         # Fetch and extract if needed
         if self.is_compressed:
             local_path, temp_dir = self.extract_file()
