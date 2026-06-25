@@ -2691,6 +2691,10 @@ class Package(models.Model):
         removed_pres_der_paths = _replace_old_pres_ders_with_reingested(
             rein_aip_internal_path, old_aip_internal_path
         )
+        # self._replace_old_ipds_target_object_with_reingested(
+        #     rein_aip_internal_path, old_aip_internal_path
+        # )
+
         # 4. If this is an IPDS re-preservation, replace the target object in
         #    the old AIP working copy with the reingested version before
         #    rebuilding the bag.
@@ -2713,10 +2717,6 @@ class Package(models.Model):
                         self.uuid,
                     )
                     # Continue reingest without re-raising
-
-        self._replace_old_ipds_target_object_with_reingested(
-            rein_aip_internal_path, old_aip_internal_path
-        )
 
         # 5. Create a new bag from the AIP at ``old_aip_internal_path`` and
         #    validate it.
