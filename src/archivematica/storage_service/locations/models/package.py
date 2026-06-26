@@ -2284,6 +2284,31 @@ class Package(models.Model):
             old_file_path,
             new_size,
         )
+    def _update_file_checksums_in_pipeline(self, extension_results, old_aip_internal_path, sip_uuid):
+        """Call the Dashboard API to update File.checksum for each IPDS-extended file.
+
+        After finish_reingest extends a file the bag manifest is updated but the
+        File table in the Dashboard DB still holds the original ingest checksum.
+        Without this sync the next reingest's verify_aip step would see a mismatch
+        between the (stale) DB checksum and the (current) bag manifest checksum.
+        """
+        if not extension_results:
+            return
+        pipeline = self.origin_pipeline
+        if not pipeline:
+            LOGGER.warning("[ipds] no origin_pipeline; cannot update File checksums in Dashboard")
+            return
+        data_dir = os.path.join(old_aip_internal_path, "data")
+        for file_path, (checksum, algorithm) in extension_results.items():
+            if not checksum:
+                continue
+            relative_path = os.path.relpath(file_path, data_dir)
+            try:
+                pipeline.update_file_checksum(sip_uuid, relative_path, checksum, algorithm)
+                LOGGER.info("[ipds] updated File.checksum in Dashboard: %s → %s (%s)", relative_path, checksum, algorithm)
+            except Exception:
+                LOGGER.exception("[ipds] failed to update File checksum for %s in Dashboard", relative_path)
+
     @staticmethod
     def _is_truthy(value):
         """Return True for common truthy representations."""
@@ -2695,20 +2720,22 @@ class Package(models.Model):
         #     rein_aip_internal_path, old_aip_internal_path
         # )
 
-        # 4. If this is an IPDS re-preservation, replace the target object in
-        #    the old AIP working copy with the reingested version before
-        #    rebuilding the bag.
-        LOGGER.info("finish_reingest: replacing IPDS target object if configured")
+        # 4. If this is an IPDS re-preservation, extend the signatures of the
+        #    target object(s) and sync the updated checksums to the Dashboard
+        #    so that File.checksum stays consistent across reingests.
+        LOGGER.info("finish_reingest: extending IPDS signatures if configured")
         misc = self.misc_attributes or {}
         if self._is_truthy(misc.get("ipds-re-preservation")):
             objects_dir = os.path.join(old_aip_internal_path, "data", "objects")
             ipds_doc_name = (misc.get("ipds-doc-name") or "").strip()
             ipds_doc_id = (misc.get("ipds-doc-id") or "").strip()
             try:
-                extend_aip_objects(objects_dir, ipds_doc_name, ipds_doc_id, logger=LOGGER)
+                extension_results = extend_aip_objects(objects_dir, ipds_doc_name, ipds_doc_id, logger=LOGGER)
+                self._update_file_checksums_in_pipeline(
+                    extension_results, old_aip_internal_path, str(self.uuid)
+                )
             except IPDSExtensionError as exc:
                 LOGGER.info("finish_reingest: ❌❌ IPDS signature extension failed for package %s: %s", self.uuid, exc)
-                #NO throw exception and call ipds event to log the failure, but continue with reingest
                 try:
                     send_extension_event(doc_id=ipds_doc_id)
                 except Exception:

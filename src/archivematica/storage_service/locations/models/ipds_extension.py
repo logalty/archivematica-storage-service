@@ -562,7 +562,7 @@ def _extend_single_file(
         timeout: int,
         configured_digest: str,
         logger,
-) -> None:
+) -> tuple:
     """Call the extension service for one file, validate the result, write the
     extended bytes back and send the IPDS event.
 
@@ -692,6 +692,8 @@ def _extend_single_file(
         logger.info("[ipds]❌❌ Error extension event not sent for '%s'", file_name)
         raise IPDSExtensionError(f"failed to send extension event for '{file_name}'")
 
+    return hash_hex, algorithm
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -703,7 +705,7 @@ def extend_aip_objects(
         ipds_doc_name: str = "",
         ipds_doc_id: str = "",
         logger=None,
-) -> bool:
+) -> dict:
     """Extend the IPDS signatures of target file(s) inside *objects_dir*.
 
     Parameters
@@ -724,7 +726,8 @@ def extend_aip_objects(
 
     Returns
     -------
-    ``True`` on full success.
+    dict mapping absolute file path to ``(checksum_hex, algorithm)`` for each
+    successfully extended file.
 
     Raises
     ------
@@ -761,8 +764,9 @@ def extend_aip_objects(
     timeout = _env_int("IPDS_RE_PRESERVATION_TIMEOUT", 60)
     configured_digest = _env_str("IPDS_RE_PRESERVATION_DIGEST_ALGORITHM", "SHA256")
 
+    results = {}
     for file_path in target_files:
-        _extend_single_file(
+        hash_hex, algorithm = _extend_single_file(
             file_path=file_path,
             ipds_doc_id=ipds_doc_id,
             headers={},
@@ -770,6 +774,7 @@ def extend_aip_objects(
             configured_digest=configured_digest,
             logger=logger,
         )
+        results[file_path] = (hash_hex, algorithm)
 
     logger.info("[ipds] all targeted files extended successfully")
-    return True
+    return results

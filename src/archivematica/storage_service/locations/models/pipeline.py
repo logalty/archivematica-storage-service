@@ -270,6 +270,36 @@ class Pipeline(URLMixin, models.Model):
                 )
         return resp.json()
 
+    def update_file_checksum(self, sip_uuid, relative_path, checksum, checksum_type):
+        """Update File.checksum in the Dashboard after an IPDS signature extension.
+
+        :param str sip_uuid: UUID of the SIP whose File record must be updated.
+        :param str relative_path: Path relative to the SIP data/ directory,
+            e.g. ``objects/doc.pdf``.  Must match currentlocation stored as
+            ``%SIPDirectory%<relative_path>``.
+        :param str checksum: New hex digest of the extended file.
+        :param str checksum_type: Algorithm name, e.g. ``sha256``.
+        :returns: True if the Dashboard acknowledged the update.
+        """
+        resp = self._request_api(
+            "POST",
+            "ingest/update_file_checksum/",
+            fields={
+                "uuid": str(sip_uuid),
+                "relative_path": relative_path,
+                "checksum": checksum,
+                "checksum_type": checksum_type,
+            },
+        )
+        if resp.status_code != requests.codes.ok:
+            LOGGER.warning(
+                "[ipds] update_file_checksum: Dashboard returned %s for %s",
+                resp.status_code,
+                relative_path,
+            )
+            return False
+        return True
+
     def approve_transfer(self, directory, transfer_type):
         """Approve a transfer in the pipeline."""
         url = "transfer/approve/"
