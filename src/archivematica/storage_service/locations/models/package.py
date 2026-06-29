@@ -2365,12 +2365,13 @@ class Package(models.Model):
 
         # Check and set reingest pipeline
         if self.misc_attributes.get("reingest_pipeline", None):
-            return {
-                "error": True,
-                "status_code": 409,
-                "message": _("This AIP is already being reingested on %(pipeline)s")
-                           % {"pipeline": self.misc_attributes["reingest_pipeline"]},
-            }
+            if reingest_ipds_represervation.lower() in ("false", "0", "no", ""):
+                return {
+                    "error": True,
+                    "status_code": 409,
+                    "message": _("This AIP is already being reingested on %(pipeline)s")
+                               % {"pipeline": self.misc_attributes["reingest_pipeline"]},
+                }
         self.misc_attributes.update({"reingest_pipeline": str(pipeline.uuid)})
         # Persist ipds-re-preservation in the Package's misc_attributes so that
         # _validate_pipelines_for_reingest can detect it even when misc_attributes
