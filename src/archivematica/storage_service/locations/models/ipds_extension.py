@@ -134,7 +134,7 @@ def signature_level_for_file(file_name: str) -> str | None:
         return "PAdES_BASELINE_LTA"
     if ext == ".xml":
         return "XAdES_BASELINE_LTA"
-    return None
+    return "CAdES_BASELINE_LTA"
 
 
 # ---------------------------------------------------------------------------
