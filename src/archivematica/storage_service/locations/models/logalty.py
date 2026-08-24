@@ -190,7 +190,7 @@ class Logalty(models.Model):
             LOGGER.error("❌ S3 upload failed: %s", e)
             raise LogaltyRESTException(f"S3 upload failed: {e}") from e
 
-        # ---------------- SPRING BOOT CALL ----------------
+        # ---------------- SPRING BOOT CALL TO IPDS TO ENCRIPT----------------
         try:
             endpoint = "/file/dip" if is_dip else "/file/aip"
             url = f"{self.logalty_url}{endpoint}"
@@ -214,8 +214,14 @@ class Logalty(models.Model):
                 timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
             )
             r.raise_for_status()
-
             LOGGER.info("🔐 Encryption triggered with s3 key: %s", s3_key)
+            try:
+                LOGGER.info("🗑️ Deleting NON-CIPHER files from S3: %s", s3_key)
+                self.bucket.Object(s3_key).delete()
+                LOGGER.info("🗑️ Delete NON-CIPHER files OK: %s", s3_key)
+            except Exception as final_del_err:
+                LOGGER.error("❌ Delete NON-CIPHER failed: %s", final_del_err)
+
             return s3_key
 
         except Exception as e:
