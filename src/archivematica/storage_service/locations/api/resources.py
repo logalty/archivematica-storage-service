@@ -1849,8 +1849,6 @@ class PackageResource(ModelResource):
             user_email=request_info["user_email"],
             store_data=package.status,
         )
-        package.status = Package.DELETED
-        package.save()
         package.delete_from_storage()
 
         request_event.save()

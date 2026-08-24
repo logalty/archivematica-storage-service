@@ -2175,7 +2175,7 @@ class Package(models.Model):
         location = self.current_location
         space = location.space
 
-        error = self._if_lockss_notify(space, self.uuid, self.misc_attributes)
+        error = self._if_lockss_notify(space, self.uuid, self.misc_attributes or {})
 
         try:
             space.delete_path(self.full_path)
@@ -2190,6 +2190,7 @@ class Package(models.Model):
         )
 
         self.status = self.DELETED
+        self.misc_attributes = {}
         self.save()
 
         self._update_storage_size(space, location, self.size)
