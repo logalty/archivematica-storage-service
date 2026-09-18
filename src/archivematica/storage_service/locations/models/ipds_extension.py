@@ -28,7 +28,7 @@ IPDS_RE_PRESERVATION_VERIFY           (bool, default True)
 IPDS_RE_PRESERVATION_RETRIES          (int, default 2)
 IPDS_RE_PRESERVATION_BACKOFF_BASE     (int seconds, default 5)
 IPDS_EXTENSION_EVENT_URL
-IPDS_EXTENSION_EVENT_RETRIES
+IPDS_EXTENSION_EVENT_RETRIES          (int, default 3)
 IPDS_EXTENSION_EVENT_BACKOFF_BASE
 """
 
@@ -534,7 +534,9 @@ def send_extension_event(
     if digest_algorithm:
         payload["digestAlgorithm"] = digest_algorithm
 
-    max_retries = _env_int("IPDS_EXTENSION_EVENT_RETRIES", 2)
+    # IPDS-460: a reingest is fail-closed when the authoritative event cannot
+    # be persisted. Retry the event three times before returning failure.
+    max_retries = _env_int("IPDS_EXTENSION_EVENT_RETRIES", 3)
     backoff_base = _env_int("IPDS_EXTENSION_EVENT_BACKOFF_BASE", 5)
     verify = _env_bool("IPDS_RE_PRESERVATION_VERIFY", True)
 

@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import pprint
 import re
 import shutil
 import urllib.parse
@@ -1096,33 +1095,27 @@ class PackageResource(ModelResource):
                 format=request.headers.get("content-type", "application/json"),
             )
             deserialized = self.alter_deserialized_detail_data(request, deserialized)
-            
+
             # Store user_id and object_salt from CORE in misc_attributes
             user_id = deserialized.get("user_id")
             object_salt = deserialized.get("object_salt")
-            
-            LOGGER.info("🔍 [DEBUG obj_create_async] Received user_id: %s | object_salt: %s", user_id, object_salt)
-            
+
             bundle = self.build_bundle(data=deserialized, request=request)
 
             bundle = super().obj_create(bundle, **kwargs)
-            
+
             # Update misc_attributes immediately after creation
             if user_id or object_salt:
                 if not bundle.obj.misc_attributes:
                     bundle.obj.misc_attributes = {}
-                
+
                 if user_id:
                     bundle.obj.misc_attributes["user_id"] = user_id
                 if object_salt:
                     bundle.obj.misc_attributes["object_salt"] = object_salt
-                
-                LOGGER.info("🔍 [DEBUG obj_create_async] bundle.obj.misc_attributes AFTER update: %s", bundle.obj.misc_attributes)
-                
+
                 # Save BEFORE calling _store_bundle
                 bundle.obj.save()
-                
-                LOGGER.info("🔍 [DEBUG obj_create_async] bundle.obj.misc_attributes AFTER save: %s", bundle.obj.misc_attributes)
 
             def task():
                 self._store_bundle(bundle)
@@ -1154,37 +1147,24 @@ class PackageResource(ModelResource):
         Create a new Package model instance. Called when a POST request is
         made to api/v2/file/.
         """
-        # DEBUG: Log complete bundle.data to see what's being received
-        LOGGER.info("🔍 [DEBUG obj_create] Complete bundle.data: %s", bundle.data)
-        
         # Store user_id and object_salt from CORE in misc_attributes BEFORE creating
         user_id = bundle.data.get("user_id")
         object_salt = bundle.data.get("object_salt")
-        
-        LOGGER.info("🔍 [DEBUG obj_create] Received user_id: %s | object_salt: %s", user_id, object_salt)
-        
         bundle = super().obj_create(bundle, **kwargs)
-        
-        LOGGER.info("🔍 [DEBUG obj_create] After super().obj_create, bundle.obj: %s", bundle.obj)
-        LOGGER.info("🔍 [DEBUG obj_create] bundle.obj.misc_attributes BEFORE update: %s", bundle.obj.misc_attributes)
-        
+
         # Update misc_attributes immediately after creation
         if user_id or object_salt:
             if not bundle.obj.misc_attributes:
                 bundle.obj.misc_attributes = {}
-            
+
             if user_id:
                 bundle.obj.misc_attributes["user_id"] = user_id
             if object_salt:
                 bundle.obj.misc_attributes["object_salt"] = object_salt
-            
-            LOGGER.info("🔍 [DEBUG obj_create] bundle.obj.misc_attributes AFTER update: %s", bundle.obj.misc_attributes)
-            
+
             # Save BEFORE calling _store_bundle
             bundle.obj.save()
-            
-            LOGGER.info("🔍 [DEBUG obj_create] bundle.obj.misc_attributes AFTER save: %s", bundle.obj.misc_attributes)
-        
+
         # Now when _store_bundle calls Logalty, the data is already in the DB
         self._store_bundle(bundle)
         return bundle
@@ -1315,7 +1295,7 @@ class PackageResource(ModelResource):
                 location=package.full_path,
                 pipeline=request_info["pipeline"],
             )
-        else:
+        elif status_code == 200:
             response = {"message": _("A deletion request already exists for this AIP.")}
 
         self.log_throttled_access(request)
@@ -1834,11 +1814,30 @@ class PackageResource(ModelResource):
     def _attempt_package_request_event(
             self, package, request_info, event_type, event_status
     ):
-        """Aprobar automáticamente la solicitud de eliminación."""
+        """Create a request and execute automatic deletion requests."""
         pipeline = Pipeline.objects.get(uuid=request_info["pipeline"])
         request_description = event_type.replace("_", " ").lower()
 
-        # Crear el evento de eliminación directamente
+        if event_type != Event.DELETE:
+            request_event = Event(
+                package=package,
+                event_type=event_type,
+                status=Event.SUBMITTED,
+                event_reason=request_info["event_reason"],
+                pipeline=pipeline,
+                user_id=request_info["user_id"],
+                user_email=request_info["user_email"],
+                store_data=package.status,
+            )
+            package.status = event_status
+            package.save()
+            request_event.save()
+            return 202, {
+                "message": _("%(event_type)s request created successfully.")
+                % {"event_type": request_description.title()},
+                "id": request_event.id,
+            }
+
         request_event = Event(
             package=package,
             event_type=event_type,
@@ -1849,15 +1848,18 @@ class PackageResource(ModelResource):
             user_email=request_info["user_email"],
             store_data=package.status,
         )
-        package.delete_from_storage()
-
+        success, error = package.delete_from_storage()
+        if not success:
+            request_event.status_reason = str(error)
         request_event.save()
-        response = {
-            "message": _("La solicitud de eliminación fue aprobada automáticamente.")
-        }
-        status_code = 202
+        if not success:
+            LOGGER.error("Automatic deletion failed for package %s: %s", package.uuid, error)
+            return 500, {
+                "message": _("Package deletion did not complete successfully."),
+                "error": str(error),
+            }
 
-        return status_code, response
+        return 202, {"message": _("The deletion request was approved automatically.")}
 
     @_custom_endpoint(expected_methods=["get", "put", "delete"])
     def manage_contents(self, request, bundle, **kwargs):

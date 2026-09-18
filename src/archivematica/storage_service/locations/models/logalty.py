@@ -1,16 +1,17 @@
-import os
 import logging
+import os
+import re
+import tempfile
 import traceback
-import requests
+
 import boto3
 import botocore
-import re
 import py7zr
-import tempfile
-
+import requests
 from django.db import models
+
+from . import StorageException
 from .location import Location
-from django.utils.translation import gettext_lazy as _
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ READ_TIMEOUT = 600
 DELETE_TIMEOUT = 60
 
 
-class LogaltyRESTException(Exception):
+class LogaltyRESTException(StorageException):
     def __init__(self, msg, url=None, exc_info=False):
         parts = [msg]
         if url:
@@ -77,6 +78,13 @@ class Logalty(models.Model):
 
     def _get_storage_prefix(self, is_dip: bool):
         return "ipds/dip_storage" if is_dip else "ipds/aip_storage"
+
+    def _build_s3_key(self, path, is_dip):
+        prefix = self._get_storage_prefix(is_dip)
+        clean_path = path.strip("/")
+        if clean_path == prefix or clean_path.startswith(f"{prefix}/"):
+            return clean_path
+        return f"{prefix}/{clean_path}"
     # -----------------------
     # UUID PARSER
     # -----------------------
@@ -159,7 +167,6 @@ class Logalty(models.Model):
         self._ensure_bucket_exists()
         filename = os.path.basename(file_path)
 
-        meta = {}
         user_id = None
         object_salt = None
 
@@ -167,31 +174,16 @@ class Logalty(models.Model):
             user_id = package.misc_attributes.get("user_id")
             object_salt = package.misc_attributes.get("object_salt")
 
-            if user_id is not None:
-                meta["user_id"] = str(user_id)
-            if object_salt is not None:
-                meta["object_salt"] = str(object_salt)
-
-        # ---------------- S3 UPLOAD SAFE ----------------
+        # Upload the clear staging object first. IPDS downloads it, encrypts it,
+        # and the staging versions are purged after successful handoff.
         try:
-            with open(file_path, "rb") as f:
-                upload_kwargs = {
-                    "Fileobj": f,
-                    "Key": s3_key,
-                }
+            with open(file_path, "rb") as source:
+                self.bucket.upload_fileobj(
+                    source,
+                    s3_key,
+                    ExtraArgs={"ChecksumAlgorithm": "SHA256"},
+                )
 
-                if meta:
-                    upload_kwargs["ExtraArgs"] = {"Metadata": meta}
-
-                self.bucket.upload_fileobj(**upload_kwargs)
-                LOGGER.info("✅✅ S3 upload completed OK: %s", s3_key)
-
-        except Exception as e:
-            LOGGER.error("❌ S3 upload failed: %s", e)
-            raise LogaltyRESTException(f"S3 upload failed: {e}") from e
-
-        # ---------------- SPRING BOOT CALL TO IPDS TO ENCRIPT----------------
-        try:
             endpoint = "/file/dip" if is_dip else "/file/aip"
             url = f"{self.logalty_url}{endpoint}"
 
@@ -199,13 +191,16 @@ class Logalty(models.Model):
                 "destination": s3_key,
                 "filename": filename,
             }
-
             if user_id:
-                payload["user_id"] = user_id
+                payload["user_id"] = str(user_id)
             if object_salt:
-                payload["object_salt"] = object_salt
+                payload["object_salt"] = str(object_salt)
 
-            LOGGER.info("📡 Calling IPDS Storage to encrypt AIP/DIP, url %s payload=%s", url, payload)
+            LOGGER.info(
+                "Calling IPDS Storage to encrypt AIP/DIP, url=%s destination=%s",
+                url,
+                s3_key,
+            )
 
             r = requests.post(
                 url,
@@ -214,25 +209,47 @@ class Logalty(models.Model):
                 timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
             )
             r.raise_for_status()
-            LOGGER.info("🔐 Encryption triggered with s3 key: %s", s3_key)
-            try:
-                LOGGER.info("🗑️ Deleting NON-CIPHER files from S3: %s", s3_key)
-                self.bucket.Object(s3_key).delete()
-                LOGGER.info("🗑️ Delete NON-CIPHER files OK: %s", s3_key)
-            except Exception as final_del_err:
-                LOGGER.error("❌ Delete NON-CIPHER failed: %s", final_del_err)
+            self._assert_s3_object_exists(f"{s3_key}_encrypted")
+            self._purge_s3_object_versions(s3_key)
 
             return s3_key
 
         except Exception as e:
-            LOGGER.error("❌ IPDS Failed to encrypt AIP/DIP → rollback S3: %s", e)
+            LOGGER.error("❌ IPDS failed to encrypt AIP/DIP; purging staging: %s", e)
             try:
-                self.bucket.Object(s3_key).delete()
-                LOGGER.info("🗑️ Rollback OK: %s", s3_key)
-            except Exception as del_err:
-                LOGGER.error("❌ Rollback failed: %s", del_err)
-
+                self._purge_s3_object_versions(s3_key)
+            except Exception as cleanup_error:
+                raise LogaltyRESTException(
+                    f"Encryption failed and staging cleanup failed: {cleanup_error}"
+                ) from e
             raise LogaltyRESTException(f"Encryption failed: {e}") from e
+
+    @staticmethod
+    def _credential_headers(user_id, object_salt):
+        headers = {}
+        if user_id:
+            headers["X-IPDS-User-Id"] = str(user_id)
+        if object_salt:
+            headers["X-IPDS-Object-Salt"] = str(object_salt)
+        return headers
+
+    def _assert_s3_object_exists(self, s3_key):
+        try:
+            response = self.s3.meta.client.head_object(
+                Bucket=self.s3_bucket,
+                Key=s3_key,
+                ChecksumMode="ENABLED",
+            )
+            if not response.get("ChecksumSHA256"):
+                raise LogaltyRESTException(
+                    f"Expected S3 object checksum is unavailable: {s3_key}"
+                )
+        except Exception as exc:
+            if isinstance(exc, LogaltyRESTException):
+                raise
+            raise LogaltyRESTException(
+                f"Expected S3 object does not exist: {s3_key}"
+            ) from exc
 
     # -----------------------
     # UPLOAD ENTRYPOINT
@@ -291,10 +308,7 @@ class Logalty(models.Model):
                 archive_path,
                 os.path.getsize(archive_path),
             )
-            storage_prefix = self._get_storage_prefix(is_dip)
-            clean_dest = destination_path.strip("/")
-
-            s3_key = f"{storage_prefix}/{clean_dest}"
+            s3_key = self._build_s3_key(destination_path, is_dip)
 
             LOGGER.info("☁️ Uploading to S3 key: %s", s3_key)
 
@@ -309,6 +323,8 @@ class Logalty(models.Model):
             )
         except Exception as exp:
             LOGGER.error("❌ Upload failed: %s", exp)
+            raise LogaltyRESTException(f"Upload failed: {exp}") from exp
+        finally:
             if archive_path and archive_path != source_path and os.path.exists(archive_path):
                 try:
                     os.remove(archive_path)
@@ -318,7 +334,6 @@ class Logalty(models.Model):
                     )
                 except Exception:
                     LOGGER.exception("Temp cleanup failed")
-            raise LogaltyRESTException(f"Upload failed: {exp}") from exp
 
 
 
@@ -387,15 +402,13 @@ class Logalty(models.Model):
 
         params = {"origin": src_path}
 
-        if user_id:
-            params["user_id"] = user_id
-        if object_salt:
-            params["object_salt"] = object_salt
+        headers = self._credential_headers(user_id, object_salt)
 
         try:
             response = requests.get(
                 url,
                 params=params,
+                headers=headers,
                 stream=True,
                 auth=(self.logalty_user, self.logalty_pass),
                 timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),

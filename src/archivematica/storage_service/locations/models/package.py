@@ -41,7 +41,6 @@ from archivematica.storage_service.locations.models.space import Space
 from archivematica.storage_service.locations.models.ipds_extension import (
     IPDSExtensionError,
     extend_aip_objects,
-    send_extension_event,
 )
 
 __all__ = ("Package",)
@@ -2737,15 +2736,19 @@ class Package(models.Model):
                     extension_results, old_aip_internal_path, str(self.uuid)
                 )
             except IPDSExtensionError as exc:
-                LOGGER.info("finish_reingest: ❌❌ IPDS signature extension failed for package %s: %s", self.uuid, exc)
-                try:
-                    send_extension_event(doc_id=ipds_doc_id)
-                except Exception:
-                    LOGGER.exception(
-                        "finish_reingest: failed to send IPDS failure event for package %s",
-                        self.uuid,
-                    )
-                    # Continue reingest without re-raising
+                # IPDS-460: the target object may already have changed, but the
+                # reingest must never be marked complete until IPDS confirms the
+                # authoritative extension event. extend_aip_objects has already
+                # exhausted the configured event retries.
+                LOGGER.error(
+                    "finish_reingest: IPDS signature extension or event persistence failed "
+                    "for package %s: %s",
+                    self.uuid,
+                    exc,
+                )
+                raise StorageException(
+                    "IPDS signature extension event was not confirmed; reingest remains incomplete"
+                ) from exc
 
         # 5. Create a new bag from the AIP at ``old_aip_internal_path`` and
         #    validate it.
