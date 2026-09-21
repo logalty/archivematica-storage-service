@@ -210,19 +210,24 @@ class Logalty(models.Model):
             )
             r.raise_for_status()
             self._assert_s3_object_exists(f"{s3_key}_encrypted")
-            self._purge_s3_object_versions(s3_key)
-
-            return s3_key
 
         except Exception as e:
             LOGGER.error("❌ IPDS failed to encrypt AIP/DIP; purging staging: %s", e)
+            cleanup_note = ""
             try:
                 self._purge_s3_object_versions(s3_key)
             except Exception as cleanup_error:
-                raise LogaltyRESTException(
-                    f"Encryption failed and staging cleanup failed: {cleanup_error}"
-                ) from e
-            raise LogaltyRESTException(f"Encryption failed: {e}") from e
+                LOGGER.error(
+                    "❌ Staging cleanup also failed for %s: %s", s3_key, cleanup_error
+                )
+                cleanup_note = f" (staging cleanup also failed: {cleanup_error})"
+            raise LogaltyRESTException(f"Encryption failed: {e}{cleanup_note}") from e
+
+        # Encryption is confirmed. The cleartext staging object must not survive it,
+        # so a failure to purge fails the store instead of being logged and forgotten.
+        self._purge_s3_object_versions(s3_key)
+
+        return s3_key
 
     @staticmethod
     def _credential_headers(user_id, object_salt):
@@ -241,8 +246,17 @@ class Logalty(models.Model):
                 ChecksumMode="ENABLED",
             )
             if not response.get("ChecksumSHA256"):
+                # The object is there, it just carries another algorithm. Name the
+                # ones it does have: otherwise an uploader that never asked for
+                # SHA256 is indistinguishable from a missing checksum.
+                present = sorted(
+                    key[len("Checksum") :]
+                    for key in response
+                    if key.startswith("Checksum") and key != "ChecksumType"
+                )
                 raise LogaltyRESTException(
-                    f"Expected S3 object checksum is unavailable: {s3_key}"
+                    f"Expected S3 object checksum is unavailable: {s3_key} "
+                    f"(SHA256 required, object carries: {', '.join(present) or 'none'})"
                 )
         except Exception as exc:
             if isinstance(exc, LogaltyRESTException):
@@ -250,6 +264,58 @@ class Logalty(models.Model):
             raise LogaltyRESTException(
                 f"Expected S3 object does not exist: {s3_key}"
             ) from exc
+
+    def _purge_s3_object_versions(self, s3_key):
+        """Delete the cleartext staging object, every version of it.
+
+        On a versioned bucket a plain delete only writes a delete marker and the
+        cleartext AIP/DIP stays recoverable, which is what this purge exists to
+        prevent. Listing and removing versions needs ``s3:ListBucketVersions``
+        and ``s3:DeleteObjectVersion``; where they are not granted we fall back
+        to a plain delete, which is what shipped before, and say so loudly.
+        """
+        client = self.s3.meta.client
+        try:
+            deleted = 0
+            paginator = client.get_paginator("list_object_versions")
+            for page in paginator.paginate(Bucket=self.s3_bucket, Prefix=s3_key):
+                # Prefix also matches `<s3_key>_encrypted`, which is the object we
+                # just went to the trouble of producing. Match the key exactly.
+                targets = [
+                    {"Key": item["Key"], "VersionId": item["VersionId"]}
+                    for group in ("Versions", "DeleteMarkers")
+                    for item in page.get(group, [])
+                    if item["Key"] == s3_key
+                ]
+                if not targets:
+                    continue
+                response = client.delete_objects(
+                    Bucket=self.s3_bucket,
+                    Delete={"Objects": targets, "Quiet": True},
+                )
+                errors = response.get("Errors") or []
+                if errors:
+                    raise LogaltyRESTException(
+                        f"Could not purge {len(errors)} staging version(s) of "
+                        f"{s3_key}: {errors[0].get('Code')}"
+                    )
+                deleted += len(targets)
+            LOGGER.info("🗑️ Purged %d staging version(s) of %s", deleted, s3_key)
+        except LogaltyRESTException:
+            raise
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code not in ("AccessDenied", "NotImplemented"):
+                raise
+            LOGGER.warning(
+                "⚠️ Cannot enumerate versions of %s (%s); deleting the current "
+                "object only. If the bucket is versioned the cleartext stays "
+                "recoverable — grant s3:ListBucketVersions and "
+                "s3:DeleteObjectVersion to close this.",
+                s3_key,
+                code,
+            )
+            client.delete_object(Bucket=self.s3_bucket, Key=s3_key)
 
     # -----------------------
     # UPLOAD ENTRYPOINT
