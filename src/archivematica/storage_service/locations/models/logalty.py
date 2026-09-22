@@ -213,14 +213,24 @@ class Logalty(models.Model):
 
         except Exception as e:
             LOGGER.error("❌ IPDS failed to encrypt AIP/DIP; purging staging: %s", e)
-            cleanup_note = ""
-            try:
-                self._purge_s3_object_versions(s3_key)
-            except Exception as cleanup_error:
-                LOGGER.error(
-                    "❌ Staging cleanup also failed for %s: %s", s3_key, cleanup_error
-                )
-                cleanup_note = f" (staging cleanup also failed: {cleanup_error})"
+            # The cleartext goes first: it is the one that must not linger. The encrypted object
+            # can also be there — IPDS writes it before we verify it, so a handoff that fails on
+            # the verification leaves it behind. This store is aborted, nothing will ever reference
+            # that key, and a retry comes in under a fresh one, so it is an orphan either way.
+            cleanup_errors = []
+            for stale_key in (s3_key, f"{s3_key}_encrypted"):
+                try:
+                    self._purge_s3_object_versions(stale_key)
+                except Exception as cleanup_error:
+                    LOGGER.error(
+                        "❌ Staging cleanup failed for %s: %s", stale_key, cleanup_error
+                    )
+                    cleanup_errors.append(f"{stale_key}: {cleanup_error}")
+            cleanup_note = (
+                f" (staging cleanup also failed: {'; '.join(cleanup_errors)})"
+                if cleanup_errors
+                else ""
+            )
             raise LogaltyRESTException(f"Encryption failed: {e}{cleanup_note}") from e
 
         # Encryption is confirmed. The cleartext staging object must not survive it,
