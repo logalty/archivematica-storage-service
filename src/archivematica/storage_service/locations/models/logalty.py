@@ -168,12 +168,11 @@ class Logalty(models.Model):
         filename = os.path.basename(file_path)
 
         user_id = None
-        object_salt = None
 
         if package and getattr(package, "misc_attributes", None):
             user_id = package.misc_attributes.get("user_id")
-            object_salt = package.misc_attributes.get("object_salt")
 
+        # The object salt is not sent (IPDS-650): ipds-storage looks it up in the ipds database by the package name.
         # Upload the clear staging object first. IPDS downloads it, encrypts it,
         # and the staging versions are purged after successful handoff.
         try:
@@ -193,8 +192,6 @@ class Logalty(models.Model):
             }
             if user_id:
                 payload["user_id"] = str(user_id)
-            if object_salt:
-                payload["object_salt"] = str(object_salt)
 
             LOGGER.info(
                 "Calling IPDS Storage to encrypt AIP/DIP, url=%s destination=%s",
@@ -214,12 +211,12 @@ class Logalty(models.Model):
         except Exception as e:
             LOGGER.error("❌ IPDS failed to encrypt AIP/DIP; purging staging: %s", e)
             cleanup_note = ""
-                try:
+            try:
                 self._purge_s3_object_versions(s3_key)
-                except Exception as cleanup_error:
-                    LOGGER.error(
+            except Exception as cleanup_error:
+                LOGGER.error(
                     "❌ Staging cleanup also failed for %s: %s", s3_key, cleanup_error
-            )
+                )
                 cleanup_note = f" (staging cleanup also failed: {cleanup_error})"
             raise LogaltyRESTException(f"Encryption failed: {e}{cleanup_note}") from e
 
@@ -230,12 +227,10 @@ class Logalty(models.Model):
         return s3_key
 
     @staticmethod
-    def _credential_headers(user_id, object_salt):
+    def _credential_headers(user_id):
         headers = {}
         if user_id:
             headers["X-IPDS-User-Id"] = str(user_id)
-        if object_salt:
-            headers["X-IPDS-Object-Salt"] = str(object_salt)
         return headers
 
     def _assert_s3_object_exists(self, s3_key):
@@ -440,7 +435,6 @@ class Logalty(models.Model):
         package_uuid = self._extract_package_uuid(src_path)
         package = None
         user_id = None
-        object_salt = None
 
         if package_uuid:
             try:
@@ -449,7 +443,6 @@ class Logalty(models.Model):
 
                 if package and package.misc_attributes:
                     user_id = package.misc_attributes.get("user_id")
-                    object_salt = package.misc_attributes.get("object_salt")
 
             except Exception:
                 LOGGER.warning("Package lookup failed")
@@ -468,7 +461,7 @@ class Logalty(models.Model):
 
         params = {"origin": src_path}
 
-        headers = self._credential_headers(user_id, object_salt)
+        headers = self._credential_headers(user_id)
 
         try:
             response = requests.get(

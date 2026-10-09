@@ -1096,23 +1096,20 @@ class PackageResource(ModelResource):
             )
             deserialized = self.alter_deserialized_detail_data(request, deserialized)
 
-            # Store user_id and object_salt from CORE in misc_attributes
+            # Store user_id from CORE in misc_attributes. The object salt is not kept here (IPDS-650):
+            # ipds-storage reads it from the ipds database, and a copy in clear defeats crypto-erasure.
             user_id = deserialized.get("user_id")
-            object_salt = deserialized.get("object_salt")
 
             bundle = self.build_bundle(data=deserialized, request=request)
 
             bundle = super().obj_create(bundle, **kwargs)
 
             # Update misc_attributes immediately after creation
-            if user_id or object_salt:
+            if user_id:
                 if not bundle.obj.misc_attributes:
                     bundle.obj.misc_attributes = {}
 
-                if user_id:
-                    bundle.obj.misc_attributes["user_id"] = user_id
-                if object_salt:
-                    bundle.obj.misc_attributes["object_salt"] = object_salt
+                bundle.obj.misc_attributes["user_id"] = user_id
 
                 # Save BEFORE calling _store_bundle
                 bundle.obj.save()
@@ -1147,20 +1144,16 @@ class PackageResource(ModelResource):
         Create a new Package model instance. Called when a POST request is
         made to api/v2/file/.
         """
-        # Store user_id and object_salt from CORE in misc_attributes BEFORE creating
+        # Store user_id from CORE in misc_attributes BEFORE creating. The object salt is not kept here (IPDS-650).
         user_id = bundle.data.get("user_id")
-        object_salt = bundle.data.get("object_salt")
         bundle = super().obj_create(bundle, **kwargs)
 
         # Update misc_attributes immediately after creation
-        if user_id or object_salt:
+        if user_id:
             if not bundle.obj.misc_attributes:
                 bundle.obj.misc_attributes = {}
 
-            if user_id:
-                bundle.obj.misc_attributes["user_id"] = user_id
-            if object_salt:
-                bundle.obj.misc_attributes["object_salt"] = object_salt
+            bundle.obj.misc_attributes["user_id"] = user_id
 
             # Save BEFORE calling _store_bundle
             bundle.obj.save()
