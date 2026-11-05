@@ -492,8 +492,13 @@ def send_extension_event(
         file_size: int | None = None,
         digest_algorithm: str | None = None,
         logger=None,
+        error: str | None = None,
 ) -> bool:
     """POST the extension event to the IPDS event endpoint.
+
+    IPDS-831: ``error`` marks a FAILURE event. IPDS treats an event without ``extensionPeriodMax``, ``hash`` and
+    ``fileSize`` as a failed extension, records ``ipds failed extension`` and raises the operator alarm; the message
+    travels in ``error`` so both say why.
 
     Returns ``True`` on success, ``False`` otherwise.
     """
@@ -533,6 +538,8 @@ def send_extension_event(
         payload["fileSize"] = int(file_size)
     if digest_algorithm:
         payload["digestAlgorithm"] = digest_algorithm
+    if error:
+        payload["error"] = str(error)[:500]
 
     # IPDS-460: a reingest is fail-closed when the authoritative event cannot
     # be persisted. Retry the event three times before returning failure.
@@ -711,6 +718,42 @@ def extend_aip_objects(
         logger=None,
 ) -> dict:
     """Extend the IPDS signatures of target file(s) inside *objects_dir*.
+
+    IPDS-831: any :class:`IPDSExtensionError` is reported to IPDS (a failure event with the message) before it is
+    raised again, so a failed extension is no longer visible only in this service's log. Reporting is best effort and
+    never hides the original error.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    try:
+        return _extend_aip_objects(objects_dir, ipds_doc_name, ipds_doc_id, logger)
+    except IPDSExtensionError as exc:
+        _report_extension_failure(ipds_doc_id, exc, logger)
+        raise
+
+
+def _report_extension_failure(ipds_doc_id: str, exc: Exception, logger) -> None:
+    """Tell IPDS that the extension failed; never raises."""
+    try:
+        sent = send_extension_event(
+            doc_id=ipds_doc_id,
+            timeout=_env_int("IPDS_RE_PRESERVATION_TIMEOUT", 60),
+            logger=logger,
+            error=str(exc) or exc.__class__.__name__,
+        )
+        if not sent:
+            logger.error("[ipds] the extension failure event for doc %s could not be delivered to IPDS", ipds_doc_id)
+    except Exception as report_exc:  # noqa: BLE001 - reporting must not mask the original failure
+        logger.error("[ipds] could not report the extension failure for doc %s: %s", ipds_doc_id, report_exc)
+
+
+def _extend_aip_objects(
+        objects_dir: str,
+        ipds_doc_name: str,
+        ipds_doc_id: str,
+        logger,
+) -> dict:
+    """Extend the IPDS signatures of target file(s) inside *objects_dir* (see :func:`extend_aip_objects`).
 
     Parameters
     ----------
