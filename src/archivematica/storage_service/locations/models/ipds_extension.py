@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import datetime
 import hashlib
+import io
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ import re
 import tempfile
 import threading
 import time
+import zipfile
 
 import requests
 
@@ -137,6 +139,217 @@ def signature_level_for_file(file_name: str) -> str | None:
     if ext == ".json":
         return "JAdES_BASELINE_LTA"
     return "CAdES_BASELINE_LTA"
+
+
+# ---------------------------------------------------------------------------
+# Objects that carry only RFC 3161 timestamps (IPDS-853)
+# ---------------------------------------------------------------------------
+#
+# DSS extendDocument extends SIGNATURES only. A PDF whose signature dictionaries are all
+# document timestamps fails with "No signatures found to be extended!", and an ASiC
+# container holding only timestamp tokens fails with "No supported signature documents
+# found!". Those objects are renewed with timestampDocument: DSS embeds the validation
+# data of the existing timestamps and adds a new timestamp over everything (PDF: an
+# incremental revision with /DSS and a new DocTimeStamp; ASiC: an ASiCArchiveManifest
+# and a new META-INF/timestampNNN.tst). The detection reads the content only and answers
+# "timestamp-only" solely when it is certain; anything else keeps the extendDocument path.
+
+_TIMESTAMP_DIGEST_ALGORITHM = "SHA256"
+_PDF_TIMESTAMP_SUBFILTER = b"ETSI.RFC3161"
+_PDF_BYTE_RANGE = re.compile(rb"/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]")
+_PDF_SUBFILTER = re.compile(rb"/SubFilter\s*/([^\s/<>\[\]()]+)")
+_PDF_HEX_STRING = re.compile(rb"\s*<[0-9A-Fa-f\s]*>\s*")
+_ASIC_MIMETYPES = {
+    "ASiC_S": "application/vnd.etsi.asic-s+zip",
+    "ASiC_E": "application/vnd.etsi.asic-e+zip",
+}
+_ASIC_FORM_BY_EXTENSION = {".asics": "ASiC_S", ".scs": "ASiC_S", ".asice": "ASiC_E", ".sce": "ASiC_E"}
+_OID_SIGNED_DATA = bytes.fromhex("2a864886f70d010702")  # 1.2.840.113549.1.7.2
+_OID_TST_INFO = bytes.fromhex("2a864886f70d0109100104")  # 1.2.840.113549.1.9.16.1.4
+
+
+def _pdf_signature_subfilters(data: bytes) -> list | None:
+    """SubFilter of every signature dictionary (signature or document timestamp) of the PDF *data*.
+
+    A signature dictionary is found through its /ByteRange, which must describe this very file: it starts at 0, stays
+    inside the file and leaves out exactly a hex string (its /Contents). Returns ``None`` when any /ByteRange or its
+    SubFilter cannot be read that way (an embedded file, an unusual writer): the caller must not guess then.
+    """
+    if b"%PDF-" not in data[:1024]:
+        return None
+    matches = list(_PDF_BYTE_RANGE.finditer(data))
+    if len(matches) != data.count(b"/ByteRange"):
+        return None
+    subfilters = []
+    for match in matches:
+        start1, length1, start2, length2 = (int(group) for group in match.groups())
+        if start1 != 0 or not 0 < length1 < start2 or start2 + length2 > len(data):
+            return None
+        if not _PDF_HEX_STRING.fullmatch(data, length1, start2):
+            return None
+        object_start = data.rfind(b"obj", 0, min(match.start(), length1))
+        object_end = data.find(b"endobj", max(match.end(), start2))
+        if object_start < 0 or object_end < 0:
+            return None
+        names = _PDF_SUBFILTER.findall(data, object_start, object_end)
+        if len(names) != 1:
+            return None
+        subfilters.append(names[0])
+    return subfilters
+
+
+def _der_element(data: bytes, pos: int, end: int) -> tuple:
+    """``(tag, value_start, value_end)`` of the definite-length DER element at *pos*; ValueError otherwise."""
+    if pos + 2 > end:
+        raise ValueError("truncated DER element")
+    tag, length = data[pos], data[pos + 1]
+    pos += 2
+    if length & 0x80:
+        size = length & 0x7F
+        if not 0 < size <= 4 or pos + size > end:
+            raise ValueError("unsupported DER length")
+        length = int.from_bytes(data[pos:pos + size], "big")
+        pos += size
+    if pos + length > end:
+        raise ValueError("truncated DER element")
+    return tag, pos, pos + length
+
+
+def _der_children(data: bytes, start: int, end: int) -> list:
+    children = []
+    while start < end:
+        child = _der_element(data, start, end)
+        children.append(child)
+        start = child[2]
+    return children
+
+
+def _timestamp_token_tst_info(token: bytes) -> bytes | None:
+    """The DER TSTInfo of an RFC 3161 timestamp token (CMS SignedData over id-ct-TSTInfo), or ``None``.
+
+    DSS rewrites an existing token when it renews a container (it adds the validation data to the SignedData), so the
+    file hash changes; the TSTInfo, which is what the TSA signed, must not.
+    """
+    try:
+        tag, start, end = _der_element(token, 0, len(token))
+        content_type, content = _der_children(token, start, end)[:2]
+        if tag != 0x30 or token[content_type[1]:content_type[2]] != _OID_SIGNED_DATA or content[0] != 0xA0:
+            return None
+        _, start, end = _der_element(token, content[1], content[2])
+        encapsulated = _der_children(token, start, end)[2]  # version, digestAlgorithms, encapContentInfo
+        econtent_type, econtent = _der_children(token, encapsulated[1], encapsulated[2])[:2]
+        if token[econtent_type[1]:econtent_type[2]] != _OID_TST_INFO or econtent[0] != 0xA0:
+            return None
+        tag, start, end = _der_element(token, econtent[1], econtent[2])
+        return token[start:end] if tag == 0x04 else None
+    except (ValueError, IndexError):
+        return None
+
+
+def _read_asic(data: bytes) -> dict | None:
+    """What the renewal needs from an ASiC container, or ``None`` if *data* is not a readable ZIP.
+
+    Entry names follow DSS 6.5 ``ASiCUtils``: a timestamp is ``META-INF/`` + "timestamp" + ``.tst``. Signatures and
+    evidence records are matched more broadly (any ``META-INF/`` entry naming them, any case) so that a doubtful
+    container is never taken for timestamp-only.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            if zf.testzip() is not None:
+                return None
+            names = zf.namelist()
+            meta = [n for n in names if n.startswith("META-INF/")]
+            return {
+                "mimetype": zf.read("mimetype").decode("utf-8").strip() if "mimetype" in names else None,
+                "documents": {
+                    n: hashlib.sha256(zf.read(n)).hexdigest()
+                    for n in names
+                    if n != "mimetype" and not n.startswith("META-INF/") and not n.endswith("/")
+                },
+                "timestamps": {
+                    n: _timestamp_token_tst_info(zf.read(n))
+                    for n in meta
+                    if "timestamp" in n and n.endswith(".tst")
+                },
+                "signed": any("signature" in n.lower() or "evidencerecord" in n.lower() for n in meta),
+            }
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, KeyError, OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _asic_form(asic: dict, file_name: str) -> str | None:
+    """``ASiC_S``/``ASiC_E`` from the file extension and the ``mimetype`` entry; ``None`` if unknown or in conflict."""
+    by_extension = _ASIC_FORM_BY_EXTENSION.get(os.path.splitext(file_name)[1].lower())
+    by_mimetype = None
+    if asic["mimetype"] is not None:
+        by_mimetype = next((form for form, mime in _ASIC_MIMETYPES.items() if mime == asic["mimetype"]), None)
+        if by_mimetype is None:
+            return None
+    if by_extension and by_mimetype and by_extension != by_mimetype:
+        return None
+    return by_extension or by_mimetype
+
+
+def timestamp_only_form(data: bytes, file_name: str) -> str | None:
+    """The DSS ``timestampContainerForm`` that renews *data* when it carries only RFC 3161 timestamps, else ``None``.
+
+    ``PDF``: at least one signature dictionary and all of them with SubFilter ``/ETSI.RFC3161`` (document timestamps).
+    ``ASiC_S``/``ASiC_E``: a container with RFC 3161 tokens in ``META-INF/*timestamp*.tst``, no signature or evidence
+    record entry and signed data to cover. Signed objects, unsigned ones and anything that cannot be classified with
+    certainty return ``None`` and keep the extendDocument path.
+    """
+    if data.startswith(b"PK\x03\x04"):
+        # A ZIP first: a stored PDF inside a container also shows "%PDF-" in its first bytes.
+        asic = _read_asic(data)
+        if asic is None or asic["signed"] or not asic["timestamps"] or not asic["documents"]:
+            return None
+        if any(tst_info is None for tst_info in asic["timestamps"].values()):
+            return None
+        form = _asic_form(asic, file_name)
+        if form == "ASiC_S" and len(asic["documents"]) != 1:
+            return None
+        return form
+    subfilters = _pdf_signature_subfilters(data)
+    if subfilters and all(name == _PDF_TIMESTAMP_SUBFILTER for name in subfilters):
+        return "PDF"
+    return None
+
+
+def _verify_timestamp_renewal(original: bytes, renewed: bytes, form: str, file_name: str) -> None:
+    """Check the DSS result of a timestamp renewal before it replaces *original*; raise IPDSExtensionError if not.
+
+    PDF: an incremental update (the original is an exact prefix) that adds document timestamps and no signature.
+    ASiC: still a valid ZIP with the right mimetype, the same signed data (same names and SHA-256), every original
+    token still there with the same TSTInfo, and at least one new token.
+    """
+    rejected = f"timestamp renewal of '{file_name}' rejected before writing it:"
+    if form == "PDF":
+        if len(renewed) <= len(original) or not renewed.startswith(original):
+            raise IPDSExtensionError(f"{rejected} the original PDF is not an exact prefix of the DSS result")
+        before = _pdf_signature_subfilters(original) or []
+        after = _pdf_signature_subfilters(renewed)
+        if after is None or any(name != _PDF_TIMESTAMP_SUBFILTER for name in after) or len(after) <= len(before):
+            raise IPDSExtensionError(f"{rejected} the DSS result does not add a document timestamp")
+        return
+
+    before = _read_asic(original)
+    after = _read_asic(renewed)
+    if before is None or after is None:
+        raise IPDSExtensionError(f"{rejected} the DSS result is not a valid ZIP container")
+    expected_mimetype = before["mimetype"] or _ASIC_MIMETYPES[form]
+    if after["mimetype"] != expected_mimetype and not (before["mimetype"] is None and after["mimetype"] is None):
+        raise IPDSExtensionError(
+            f"{rejected} mimetype {after['mimetype']!r} instead of {expected_mimetype!r}"
+        )
+    if after["documents"] != before["documents"]:
+        raise IPDSExtensionError(f"{rejected} the signed data inside the container changed")
+    for name, tst_info in before["timestamps"].items():
+        if after["timestamps"].get(name) != tst_info:
+            raise IPDSExtensionError(f"{rejected} the original timestamp '{name}' is missing or changed")
+    if after["signed"]:
+        raise IPDSExtensionError(f"{rejected} the DSS result holds a signature or evidence record entry")
+    if not set(after["timestamps"]) - set(before["timestamps"]):
+        raise IPDSExtensionError(f"{rejected} the DSS result does not add a timestamp token")
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +511,35 @@ def _extract_earliest_certificate_not_after(resp_json: dict) -> datetime.datetim
     return earliest
 
 
-def extract_extension_period_max(resp_json: dict) -> datetime.datetime | None:
+def _latest_timestamp_period(entries: list) -> datetime.datetime | None:
+    """ExtensionPeriodMax of the most recent top-level ``Timestamp`` entry (by ProductionTime), or ``None``.
+
+    Ties on ProductionTime keep the earliest ExtensionPeriodMax.
+    """
+    candidates = []
+    for entry in entries:
+        node = entry.get("Timestamp") if isinstance(entry, dict) else None
+        if not isinstance(node, dict):
+            continue
+        produced = _parse_dss_datetime(node.get("ProductionTime"))
+        period = _parse_dss_datetime(node.get("ExtensionPeriodMax"))
+        if produced is not None and period is not None:
+            candidates.append((produced, period))
+    if not candidates:
+        return None
+    newest = max(produced for produced, _ in candidates)
+    return min(period for produced, period in candidates if produced == newest)
+
+
+def extract_extension_period_max(resp_json: dict, latest_timestamp: bool = False) -> datetime.datetime | None:
     """Extract the earliest ExtensionPeriodMax from a DSS validation response.
 
     Falls back to the earliest certificate NotAfter if no ExtensionPeriodMax
     is present.
+
+    IPDS-853: with ``latest_timestamp`` (an object that carries only timestamps, just renewed) the date is the
+    ExtensionPeriodMax of the most recent timestamp, which covers the earlier ones: an older TSU certificate must not
+    bring the next renewal forward. Without a dated ``Timestamp`` entry it falls back to the rule above.
     """
     logger = logging.getLogger(__name__)
     if not resp_json or not isinstance(resp_json, dict):
@@ -326,6 +563,12 @@ def extract_extension_period_max(resp_json: dict) -> datetime.datetime | None:
         entries = [entries]
     elif not isinstance(entries, list):
         entries = []
+
+    if latest_timestamp:
+        latest = _latest_timestamp_period(entries)
+        if latest is not None:
+            logger.info("[ipds] extracted ExtensionPeriodMax=%s from the most recent timestamp", latest.isoformat())
+            return latest
 
     earliest = None
     for entry in entries:
@@ -428,9 +671,12 @@ def validate_signature_and_extract_period(
         headers: dict,
         timeout: int,
         logger=None,
+        latest_timestamp: bool = False,
 ) -> datetime.datetime | None:
     """Send the extended document to the DSS validation endpoint and return
     the earliest ExtensionPeriodMax, or ``None`` if it cannot be determined.
+
+    ``latest_timestamp``: see :func:`extract_extension_period_max` (IPDS-853).
     """
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -475,7 +721,7 @@ def validate_signature_and_extract_period(
         logger.error("[ipds] validation call failed for '%s': %s", file_name, exc)
         return None
 
-    return extract_extension_period_max(resp_json)
+    return extract_extension_period_max(resp_json, latest_timestamp=latest_timestamp)
 
 
 # ---------------------------------------------------------------------------
@@ -607,14 +853,35 @@ def _extend_single_file(
         original_bytes = fh.read()
 
     file_bytes_b64 = base64.b64encode(original_bytes).decode("ascii")
-    payload = {
-        "toExtendDocument": {"bytes": file_bytes_b64, "name": file_name},
-        "parameters": {"signatureLevel": signature_level},
-    }
+    # IPDS-853: an object that carries only RFC 3161 timestamps has no signature to extend; it is renewed with
+    # timestampDocument, which sits next to extendDocument in the same DSS service.
+    timestamp_form = timestamp_only_form(original_bytes, file_name)
+    if timestamp_form:
+        service_url = re.sub(r"/extendDocument$", "/timestampDocument", external_service_url.rstrip("/"))
+        if not service_url.endswith("/timestampDocument"):
+            raise IPDSExtensionError(
+                f"'{file_name}' carries only timestamps but the timestampDocument URL cannot be derived from "
+                f"IPDS_RE_PRESERVATION_SERVICE_URL={external_service_url!r} (it must end in /extendDocument)"
+            )
+        payload = {
+            "toTimestampDocument": {"bytes": file_bytes_b64, "name": file_name},
+            "timestampParameters": {
+                "timestampContainerForm": timestamp_form,
+                "digestAlgorithm": _TIMESTAMP_DIGEST_ALGORITHM,
+            },
+        }
+        logger.info("[ipds] '%s' carries only RFC 3161 timestamps (%s): renewing it with a new timestamp",
+                    file_name, timestamp_form)
+    else:
+        service_url = external_service_url
+        payload = {
+            "toExtendDocument": {"bytes": file_bytes_b64, "name": file_name},
+            "parameters": {"signatureLevel": signature_level},
+        }
 
-    logger.info("[ipds] sending '%s' to %s", file_name, external_service_url)
+    logger.info("[ipds] sending '%s' to %s", file_name, service_url)
     resp = _post_with_retry(
-        external_service_url, payload, req_headers, timeout, verify, max_retries, backoff_base, logger
+        service_url, payload, req_headers, timeout, verify, max_retries, backoff_base, logger
     )
 
     try:
@@ -637,6 +904,9 @@ def _extend_single_file(
         raise IPDSExtensionError(
             f"failed to decode extended bytes for '{file_name}': {exc}"
         ) from exc
+
+    if timestamp_form:
+        _verify_timestamp_renewal(original_bytes, extended_bytes, timestamp_form, file_name)
 
     # Write extended document back to disk atomically (temp file + rename)
     dir_name = os.path.dirname(file_path)
@@ -663,7 +933,8 @@ def _extend_single_file(
 
     # Validate and extract ExtensionPeriodMax
     period = validate_signature_and_extract_period(
-        extended_bytes, file_name, headers=req_headers, timeout=timeout, logger=logger
+        extended_bytes, file_name, headers=req_headers, timeout=timeout, logger=logger,
+        latest_timestamp=bool(timestamp_form),
     )
     if period is None:
         raise IPDSExtensionError(
