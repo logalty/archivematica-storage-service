@@ -340,6 +340,43 @@ def get_compression(pointer_path):
         return COMPRESSION_7Z_BZIP
 
 
+def get_compression_from_package_file(package_path):
+    """Deduce how the package file at ``package_path`` is compressed by looking
+    at the file itself, for packages whose pointer file is not available.
+
+    The file signature (magic number) is checked first and the extension is
+    used only if the signature is not conclusive. Only formats that
+    Archivematica itself produces are recognised.
+
+    :param package_path: path to the (local) compressed package
+    :returns: one of the constants in ``COMPRESSION_ALGORITHMS`` that are valid
+        for extraction, or ``None`` if the format could not be determined (the
+        caller is expected to fall back to a format-agnostic tool such as
+        ``unar``). 7z variants are indistinguishable for extraction purposes,
+        so ``COMPRESSION_7Z_BZIP`` is returned for every 7z archive.
+    """
+    try:
+        with open(package_path, "rb") as f:
+            header = f.read(6)
+    except OSError:
+        header = b""
+    if header.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return COMPRESSION_7Z_BZIP
+    if header.startswith(b"BZh"):
+        return COMPRESSION_TAR_BZIP2
+    if header.startswith(b"\x1f\x8b"):
+        return COMPRESSION_TAR_GZIP
+
+    lowered = str(package_path).lower()
+    if lowered.endswith(".7z"):
+        return COMPRESSION_7Z_BZIP
+    if lowered.endswith((".tar.bz2", ".tbz2", ".tbz")):
+        return COMPRESSION_TAR_BZIP2
+    if lowered.endswith((".tar.gz", ".tgz")):
+        return COMPRESSION_TAR_GZIP
+    return None
+
+
 def get_compress_command(compression, extract_path, basename, full_path):
     """Return command for compressing the package
 

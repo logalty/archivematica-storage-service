@@ -1173,7 +1173,49 @@ class Package(models.Model):
         ptr_path = self.full_pointer_file_path
         if not ptr_path:
             return None
+        if not os.path.isfile(ptr_path):
+            # The pointer file is recorded in the database but is not on disk
+            # (e.g. the internal location is not persistent). Callers already
+            # handle ``None``; never invent a pointer file here.
+            LOGGER.warning(
+                "Pointer file of package %s is missing on disk (%s); "
+                "continuing as if the package had no pointer file",
+                self.uuid,
+                ptr_path,
+            )
+            return None
         return metsrw.METSDocument.fromfile(ptr_path)
+
+    def _get_compression_for_extraction(self, package_path):
+        """Return the compression algorithm to use to extract the compressed
+        package at ``package_path``, or ``None`` if ``unar`` should be used.
+
+        The pointer file is the source of truth. If it is not available (no
+        pointer file recorded, or recorded but missing on disk) the compression
+        is deduced from the package file itself.
+        """
+        pointer_path = self.full_pointer_file_path
+        if pointer_path and os.path.isfile(pointer_path):
+            return utils.get_compression(pointer_path)
+        compression = utils.get_compression_from_package_file(package_path)
+        if pointer_path:
+            LOGGER.warning(
+                "Pointer file of package %s is missing on disk (%s); "
+                "deduced compression %r from the package file %s",
+                self.uuid,
+                pointer_path,
+                compression,
+                package_path,
+            )
+        else:
+            LOGGER.warning(
+                "Package %s has no pointer file; deduced compression %r "
+                "from the package file %s",
+                self.uuid,
+                compression,
+                package_path,
+            )
+        return compression
 
     def create_replica_pointer_file(
             self,
@@ -1638,10 +1680,9 @@ class Package(models.Model):
             # differently than 7z/tar do: the resulting .-prefixed files have
             # different sizes than those created via unar. This makes
             # ``bag.validate`` choke.
-            if self.full_pointer_file_path:
-                compression = utils.get_compression(self.full_pointer_file_path)
-            else:
-                compression = None  # no pointer file :. command will be unar
+            # Without a pointer file the compression is deduced from the
+            # package itself; if that is not possible the command will be unar.
+            compression = self._get_compression_for_extraction(full_path)
             command = _get_decompr_cmd(compression, extract_path, full_path)
             if relative_path:
                 command.append(relative_path)
@@ -2633,6 +2674,20 @@ class Package(models.Model):
         # this AIP was compressed.
         was_compressed = self.is_compressed
         LOGGER.info("finish_reingest: was_compressed=%s for package %s", was_compressed, self.uuid)
+        # The pointer file of the current version may be recorded in the
+        # database but missing on disk. In that case it is rebuilt below
+        # (step 8) instead of failing when it has to be updated (step 11).
+        old_pointer_missing = False
+        if was_compressed and self.package_type in (Package.AIP, Package.AIC):
+            old_pointer_path = self.full_pointer_file_path
+            if not (old_pointer_path and os.path.isfile(old_pointer_path)):
+                old_pointer_missing = True
+                LOGGER.warning(
+                    "finish_reingest: pointer file of package %s is missing "
+                    "(%s); it will be rebuilt",
+                    self.uuid,
+                    old_pointer_path,
+                )
         # Copy the current AIP to the Storage Service's internal location,
         # extracting it if needed. We keep track of ``extract_path_to_delete``
         # so we can delete it later. Note: ``old_aip_internal_path`` points to
@@ -2763,8 +2818,10 @@ class Package(models.Model):
                 # this pointer file. TODO: this is maybe not a good idea and
                 # might be what is messing with encrypted re-ingest...
                 LOGGER.info(f'Extracted compression "{compression}" from pointer file')
-                if was_compressed:
+                if was_compressed and not old_pointer_missing:
                     os.remove(rein_pointer_dst_full_path)
+                # If the old pointer file is missing the reingest pointer is
+                # kept: step 8 installs it as the package's pointer file.
             else:
                 (
                     compression_algorithm,
@@ -2824,10 +2881,36 @@ class Package(models.Model):
         # 8. Create a pointer file if AM has not done so.
         LOGGER.info("finish_reingest: Create a pointer file if AM has not done so")
         if (
+                old_pointer_missing
+                and self.package_type in (Package.AIP, Package.AIC)
+                and rein_aip_is_compressed
+                and os.path.isfile(reingest_pointer_src_full_path)
+        ):
+            # AM created the pointer file of the reingested AIP and the old one
+            # is gone: use the AM one (as ``_get_rein_pointer_paths`` does for
+            # AIPs that were not compressed) instead of updating a missing file.
+            self._ensure_pointer_file_location()
+            LOGGER.warning(
+                "finish_reingest: installing the pointer file created by AM "
+                "as the pointer file of package %s at %s",
+                self.uuid,
+                self.full_pointer_file_path,
+            )
+            os.makedirs(os.path.dirname(self.full_pointer_file_path), exist_ok=True)
+            shutil.move(rein_pointer_dst_full_path, self.full_pointer_file_path)
+        elif (
                 self.package_type in (Package.AIP, Package.AIC)
                 and rein_aip_is_compressed
                 and (not os.path.isfile(reingest_pointer_src_full_path))
         ):
+            if old_pointer_missing:
+                self._ensure_pointer_file_location()
+                LOGGER.warning(
+                    "finish_reingest: rebuilding the missing pointer file of "
+                    "package %s at %s from the PREMIS events passed by AM",
+                    self.uuid,
+                    self.full_pointer_file_path,
+                )
             self._create_pointer_file_write_to_disk(
                 self.full_pointer_file_path,
                 checksum,
@@ -3108,6 +3191,24 @@ class Package(models.Model):
         self.current_path = dest_path
         return storage_effects
 
+    def _ensure_pointer_file_location(self):
+        """Make sure the package has a location and path for its pointer file,
+        using the default ones (SS internal location, ``pointer.<uuid>.xml``)
+        if none is recorded. Nothing is written to disk.
+        """
+        if self.pointer_file_location and self.pointer_file_path:
+            return
+        uuid_path = utils.uuid_to_path(self.uuid)
+        self.pointer_file_location = Location.active.get(
+            purpose=Location.STORAGE_SERVICE_INTERNAL
+        )
+        self.pointer_file_path = os.path.join(uuid_path, f"pointer.{self.uuid}.xml")
+        LOGGER.warning(
+            "Package %s had no pointer file location; using %s",
+            self.uuid,
+            self.full_pointer_file_path,
+        )
+
     def _process_pointer_file_for_reingest(
             self, to_be_compressed, was_compressed, compression, updated_aip_path
     ):
@@ -3125,7 +3226,16 @@ class Package(models.Model):
             self._update_pointer_file(compression, mets, path=updated_aip_path)
         elif was_compressed:
             # AIP used to be compressed, but is no longer so delete pointer file
-            os.remove(self.full_pointer_file_path)
+            pointer_path = self.full_pointer_file_path
+            if pointer_path and os.path.isfile(pointer_path):
+                os.remove(pointer_path)
+            else:
+                LOGGER.warning(
+                    "Pointer file of package %s was already missing (%s); "
+                    "nothing to delete",
+                    self.uuid,
+                    pointer_path,
+                )
             self.pointer_file_location = None
             self.pointer_file_path = None
 
