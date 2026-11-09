@@ -14,6 +14,7 @@ Execution example:
 ./manage.py populate_aip_checksums
 """
 
+import os
 import pathlib
 
 from django.core.management.base import CommandError
@@ -90,12 +91,24 @@ class Command(StorageServiceCommand):
         error_count = 0
 
         for aip in compressed_aips:
-            checksum, checksum_algorithm = utils.get_compressed_package_checksum(
-                aip.full_pointer_file_path
-            )
+            pointer_path = aip.full_pointer_file_path
+            if pointer_path and os.path.isfile(pointer_path):
+                checksum, checksum_algorithm = utils.get_compressed_package_checksum(
+                    pointer_path
+                )
+            else:
+                # The pointer file lives in the Storage Service internal
+                # location and may be lost across pod replacement. The
+                # compressed AIP itself remains the authoritative source for
+                # its package checksum in that case.
+                package_path = aip.fetch_local_path()
+                checksum = utils.generate_checksum(
+                    package_path, Package.DEFAULT_CHECKSUM_ALGORITHM
+                ).hexdigest()
+                checksum_algorithm = Package.DEFAULT_CHECKSUM_ALGORITHM
             if checksum is None:
                 self.error(
-                    f"Unable to retrieve checksum information from pointer file for compressed AIP {aip.uuid}"
+                    f"Unable to calculate checksum for compressed AIP {aip.uuid}"
                 )
                 error_count += 1
                 continue

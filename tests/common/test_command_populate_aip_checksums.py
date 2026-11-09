@@ -160,6 +160,39 @@ def test_command_updates_checksum_for_compressed_aip(
 
 @pytest.mark.django_db
 @mock.patch("archivematica.storage_service.common.utils.generate_checksum")
+def test_command_calculates_checksum_for_compressed_aip_without_pointer(
+    generate_checksum: mock.Mock,
+    capsys: pytest.CaptureFixture[str],
+    compressed_package: models.Package,
+    aip_storage_fs_location: models.Location,
+) -> None:
+    compressed_package_checksum = "a" * 64
+    generate_checksum.return_value = mock.Mock(
+        **{"hexdigest.return_value": compressed_package_checksum}
+    )
+
+    missing_pointer = pathlib.Path(aip_storage_fs_location.full_path) / "missing-pointer.xml"
+    with mock.patch.object(models.Package, "full_pointer_file_path", missing_pointer):
+        call_command(
+            "populate_aip_checksums",
+            "--location-uuid",
+            aip_storage_fs_location.uuid,
+        )
+
+    generate_checksum.assert_called_once_with(
+        compressed_package.full_path, models.Package.DEFAULT_CHECKSUM_ALGORITHM
+    )
+    assert compressed_package.checksum == compressed_package_checksum
+    assert compressed_package.checksum_algorithm == "sha256"
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        f"AIP {compressed_package.uuid} updated with sha256 checksum {compressed_package_checksum}",
+        f"Complete. Checksums added for all {models.Package.objects.count()} identified AIPs.",
+    ]
+
+
+@pytest.mark.django_db
+@mock.patch("archivematica.storage_service.common.utils.generate_checksum")
 def test_command_updates_checksum_for_uncompressed_aip(
     generate_checksum: mock.Mock,
     capsys: pytest.CaptureFixture[str],
