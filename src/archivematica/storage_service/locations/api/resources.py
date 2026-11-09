@@ -1206,6 +1206,12 @@ class PackageResource(ModelResource):
             # Update reingest - should only be notifications of done/failed
             if "reingest" in bundle.data:
                 bundle.obj.misc_attributes.update({"reingest_pipeline": None})
+                # ``reingest`` is not a model field, so tastypie's PATCH only
+                # saves ``update_fields=[]`` and Django then writes nothing:
+                # ask explicitly to persist ``misc_attributes``.
+                update_fields = getattr(bundle, "update_fields", None)
+                if update_fields is not None and "misc_attributes" not in update_fields:
+                    update_fields.append("misc_attributes")
             return bundle
         origin_location_uri = bundle.data.get("origin_location")
         origin_path = bundle.data.get("origin_path")
