@@ -189,6 +189,13 @@ class Package(models.Model):
     OBJECTS = "objects"  # Re-ingest metadata and objects for DIP generation
     FULL = "full"  # Full re-ingest
     REINGEST_CHOICES = (METADATA_ONLY, OBJECTS, FULL)
+    # ``misc_attributes`` keys that ``start_reingest`` sets when it locks the AIP
+    REINGEST_LOCK_KEYS = (
+        "reingest_pipeline",
+        "ipds-re-preservation",
+        "ipds-doc-name",
+        "ipds-doc-id",
+    )
 
     class Meta:
         verbose_name = _("Package")
@@ -2413,6 +2420,13 @@ class Package(models.Model):
                     "message": _("This AIP is already being reingested on %(pipeline)s")
                                % {"pipeline": self.misc_attributes["reingest_pipeline"]},
                 }
+        # Remember what this call is about to change, so that the lock can be
+        # released if the reingest does not start (see ``_release_reingest_lock``).
+        previous_lock_state = {
+            key: self.misc_attributes[key]
+            for key in self.REINGEST_LOCK_KEYS
+            if key in self.misc_attributes
+        }
         self.misc_attributes.update({"reingest_pipeline": str(pipeline.uuid)})
         # Persist ipds-re-preservation in the Package's misc_attributes so that
         # _validate_pipelines_for_reingest can detect it even when misc_attributes
@@ -2444,6 +2458,61 @@ class Package(models.Model):
         # by a concurrent request before start_reingest completes.
         self.save()
 
+        # If anything fails before the pipeline accepts the reingest, release
+        # the lock: otherwise the AIP stays blocked ("already being reingested")
+        # by a reingest that never started.
+        try:
+            response = self._start_reingest_locked(
+                pipeline,
+                reingest_type,
+                processing_config,
+                reingest_ipds_represervation,
+                reingest_ipds_doc_name,
+                reingest_ipds_doc_id,
+            )
+        except Exception:
+            self._release_reingest_lock(previous_lock_state)
+            raise
+        if response.get("error"):
+            self._release_reingest_lock(previous_lock_state)
+        return response
+
+    def _release_reingest_lock(self, previous_lock_state):
+        """Undo the ``misc_attributes`` changes that ``start_reingest`` made to
+        lock the package, restoring ``previous_lock_state``, and persist them.
+        """
+        misc_attributes = self.misc_attributes or {}
+        for key in self.REINGEST_LOCK_KEYS:
+            if key in previous_lock_state:
+                misc_attributes[key] = previous_lock_state[key]
+            else:
+                misc_attributes.pop(key, None)
+        self.misc_attributes = misc_attributes
+        try:
+            self.save()
+        except Exception:
+            LOGGER.exception(
+                "Reingest: could not release the reingest lock of package %s",
+                self.uuid,
+            )
+        else:
+            LOGGER.warning(
+                "Reingest: reingest of package %s did not start; lock released",
+                self.uuid,
+            )
+
+    def _start_reingest_locked(
+            self,
+            pipeline,
+            reingest_type,
+            processing_config,
+            reingest_ipds_represervation,
+            reingest_ipds_doc_name,
+            reingest_ipds_doc_id,
+    ):
+        """Second half of ``start_reingest``: run it once the package is locked.
+        Same return value as ``start_reingest``.
+        """
         # Run fixity
         # Fixity will fetch & extract package if needed
         success, ___, error_msg, ___ = self.check_fixity(delete_after=False)
