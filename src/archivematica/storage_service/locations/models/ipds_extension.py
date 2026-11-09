@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+from typing import Dict, Optional
 import tempfile
 import threading
 import time
@@ -598,6 +599,68 @@ def extract_extension_period_max(resp_json: dict, latest_timestamp: bool = False
     return _extract_earliest_certificate_not_after(resp_json)
 
 
+# IPDS-894: DSS signature format of the extended document.
+_FORMAT_LEVEL_RANK = {"B": 1, "T": 2, "LT": 3, "LTA": 4}
+_MAX_SIGNATURE_FORMAT_LENGTH = 64
+
+
+def _signature_format_rank(signature_format: str) -> int:
+    """Rank a DSS signature format by its ETSI baseline level (``PAdES-BASELINE-LT`` -> 3).
+
+    A format that is not a baseline profile (``PDF-NOT-ETSI``, ``XML-NOT-ETSI``, ``CMS-NOT-ETSI``...) ranks 0, below
+    ``B``: it carries no ETSI guarantee at all.
+    """
+    match = re.search(r"-BASELINE-(LTA|LT|T|B)$", signature_format)
+    return _FORMAT_LEVEL_RANK[match.group(1)] if match else 0
+
+
+def extract_signature_format(resp_json: dict) -> Optional[str]:
+    """Return the DSS ``SignatureFormat`` of the signatures in a validation response, or ``None``.
+
+    Reads the same ``SimpleReport`` entries as :func:`extract_extension_period_max` and only looks at ``Signature``
+    nodes (a ``Timestamp`` or ``EvidenceRecord`` node has no signature format). Only a value DSS actually returned is
+    used: nothing is inferred from the level that was requested.
+
+    Several signatures: the document is reported with the format of its WEAKEST signature (lowest baseline level; a
+    non-baseline format counts as lower than ``B``; on a tie, the first one in report order). This is the same
+    conservative rule as the earliest ``ExtensionPeriodMax``: the profile of the document is only as good as its
+    least preserved signature, so one that failed to reach LTA is not hidden behind one that did.
+    """
+    if not resp_json or not isinstance(resp_json, dict):
+        return None
+    simple_report = (
+            resp_json.get("SimpleReport")
+            or resp_json.get("simpleReport")
+            or resp_json.get("simple_report")
+    )
+    if not isinstance(simple_report, dict):
+        return None
+    entries = (
+            simple_report.get("signatureOrTimestampOrEvidenceRecord")
+            or simple_report.get("signatureOrTimestamp")
+            or []
+    )
+    if isinstance(entries, dict):
+        entries = [entries]
+    elif not isinstance(entries, list):
+        return None
+
+    weakest = None
+    for entry in entries:
+        node = entry.get("Signature") if isinstance(entry, dict) else None
+        if not isinstance(node, dict):
+            continue
+        value = node.get("SignatureFormat")
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if not value or len(value) > _MAX_SIGNATURE_FORMAT_LENGTH:
+            continue
+        if weakest is None or _signature_format_rank(value) < _signature_format_rank(weakest):
+            weakest = value
+    return weakest
+
+
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
@@ -672,11 +735,16 @@ def validate_signature_and_extract_period(
         timeout: int,
         logger=None,
         latest_timestamp: bool = False,
+        signature_format_out: Optional[Dict] = None,
 ) -> datetime.datetime | None:
     """Send the extended document to the DSS validation endpoint and return
     the earliest ExtensionPeriodMax, or ``None`` if it cannot be determined.
 
     ``latest_timestamp``: see :func:`extract_extension_period_max` (IPDS-853).
+
+    ``signature_format_out`` (IPDS-894): when given, the DSS ``SignatureFormat`` of the validated document is stored in
+    it under ``"signatureFormat"`` (see :func:`extract_signature_format`). The key is left out when DSS returned none,
+    so the return value and every error path stay as they were.
     """
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -721,6 +789,13 @@ def validate_signature_and_extract_period(
         logger.error("[ipds] validation call failed for '%s': %s", file_name, exc)
         return None
 
+    if signature_format_out is not None:
+        signature_format = extract_signature_format(resp_json)
+        if signature_format:
+            signature_format_out["signatureFormat"] = signature_format
+        else:
+            logger.warning("[ipds] DSS returned no SignatureFormat for '%s'; the event will not carry it", file_name)
+
     return extract_extension_period_max(resp_json, latest_timestamp=latest_timestamp)
 
 
@@ -739,8 +814,12 @@ def send_extension_event(
         digest_algorithm: str | None = None,
         logger=None,
         error: str | None = None,
+        signature_format: str | None = None,
 ) -> bool:
     """POST the extension event to the IPDS event endpoint.
+
+    IPDS-894: ``signature_format`` is the DSS ``SignatureFormat`` of the extended document, as DSS validated it. It is
+    optional on the IPDS side and is only sent when there is a value.
 
     IPDS-831: ``error`` marks a FAILURE event. IPDS treats an event without ``extensionPeriodMax``, ``hash`` and
     ``fileSize`` as a failed extension, records ``ipds failed extension`` and raises the operator alarm; the message
@@ -786,6 +865,8 @@ def send_extension_event(
         payload["digestAlgorithm"] = digest_algorithm
     if error:
         payload["error"] = str(error)[:500]
+    if signature_format:
+        payload["signatureFormat"] = signature_format
 
     # IPDS-460: a reingest is fail-closed when the authoritative event cannot
     # be persisted. Retry the event three times before returning failure.
@@ -932,9 +1013,11 @@ def _extend_single_file(
     logger.info("[ipds] '%s' replaced with extended-signature version (%d bytes)", file_name, len(extended_bytes))
 
     # Validate and extract ExtensionPeriodMax
+    # IPDS-894: the resulting profile is only reported for a signature extension; a timestamp renewal has no signature.
+    format_out = None if timestamp_form else {}
     period = validate_signature_and_extract_period(
         extended_bytes, file_name, headers=req_headers, timeout=timeout, logger=logger,
-        latest_timestamp=bool(timestamp_form),
+        latest_timestamp=bool(timestamp_form), signature_format_out=format_out,
     )
     if period is None:
         raise IPDSExtensionError(
@@ -969,6 +1052,7 @@ def _extend_single_file(
         file_size=file_size,
         digest_algorithm=configured_digest,
         logger=logger,
+        signature_format=(format_out or {}).get("signatureFormat"),
     )
     if not sent:
         logger.info("[ipds]❌❌ Error extension event not sent for '%s'", file_name)
