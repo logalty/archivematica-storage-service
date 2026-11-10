@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import traceback
+import uuid
 
 import boto3
 import botocore
@@ -166,6 +167,10 @@ class Logalty(models.Model):
 
         self._ensure_bucket_exists()
         filename = os.path.basename(file_path)
+        # Use a unique cleartext staging key for every handoff. Reingests reuse
+        # the final AIP path; using it as staging as well can make a callback
+        # read a previous version or race with another publication.
+        staging_key = f"{s3_key}.staging.{uuid.uuid4().hex}"
 
         user_id = None
 
@@ -179,7 +184,7 @@ class Logalty(models.Model):
             with open(file_path, "rb") as source:
                 self.bucket.upload_fileobj(
                     source,
-                    s3_key,
+                    staging_key,
                     ExtraArgs={"ChecksumAlgorithm": "SHA256"},
                 )
 
@@ -187,7 +192,8 @@ class Logalty(models.Model):
             url = f"{self.logalty_url}{endpoint}"
 
             payload = {
-                "destination": s3_key,
+                "destination": staging_key,
+                "target_destination": s3_key,
                 "filename": filename,
             }
             if user_id:
@@ -212,17 +218,17 @@ class Logalty(models.Model):
             LOGGER.error("❌ IPDS failed to encrypt AIP/DIP; purging staging: %s", e)
             cleanup_note = ""
             try:
-                self._purge_s3_object_versions(s3_key)
+                self._purge_s3_object_versions(staging_key)
             except Exception as cleanup_error:
                 LOGGER.error(
-                    "❌ Staging cleanup also failed for %s: %s", s3_key, cleanup_error
+                    "❌ Staging cleanup also failed for %s: %s", staging_key, cleanup_error
                 )
                 cleanup_note = f" (staging cleanup also failed: {cleanup_error})"
             raise LogaltyRESTException(f"Encryption failed: {e}{cleanup_note}") from e
 
         # Encryption is confirmed. The cleartext staging object must not survive it,
         # so a failure to purge fails the store instead of being logged and forgotten.
-        self._purge_s3_object_versions(s3_key)
+        self._purge_s3_object_versions(staging_key)
 
         return s3_key
 
