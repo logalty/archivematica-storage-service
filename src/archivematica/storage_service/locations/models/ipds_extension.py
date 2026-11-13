@@ -13,11 +13,18 @@ Public entry point
     Extend the signatures of target file(s) inside *objects_dir*.  Returns
     ``True`` on full success or raises ``IPDSExtensionError`` on failure.
 
-Environment variables (all optional, sensible defaults are provided)
---------------------------------------------------------------------
+Environment variables
+---------------------
+Required (the Storage Service refuses to start without them, see
+``ensure_cognito_settings``; there is no default, the secret must come from the
+deployment Secret and never from the code):
+
 IPDS_RE_PRESERVATION_COGNITO_CLIENT_ID
 IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET
 IPDS_RE_PRESERVATION_COGNITO_TOKEN_URL
+
+Optional (sensible defaults are provided):
+
 IPDS_RE_PRESERVATION_COGNITO_SCOPE
 IPDS_RE_PRESERVATION_COGNITO_TIMEOUT
 IPDS_RE_PRESERVATION_SERVICE_URL
@@ -357,10 +364,29 @@ def _verify_timestamp_renewal(original: bytes, renewed: bytes, form: str, file_n
 # Cognito token
 # ---------------------------------------------------------------------------
 
-_DEFAULT_COGNITO_CLIENT_ID = "4jheas80l5e79c4peue3gonh7m"
-_DEFAULT_COGNITO_CLIENT_SECRET = "pc6n26cdc60efn99vi8ms8if636g6i0btaeuamo2ooho57qlouh"
-_DEFAULT_COGNITO_TOKEN_URL = "https://api-auth-dev-logalty.auth.eu-west-1.amazoncognito.com/oauth2/token"
 _DEFAULT_COGNITO_SCOPE = "dss/certificate-validation"
+
+# Settings without which no Cognito token can be requested. They have no default on purpose (IPDS-902): a
+# client secret written in the code is a leaked secret.
+COGNITO_REQUIRED_ENV = (
+    "IPDS_RE_PRESERVATION_COGNITO_CLIENT_ID",
+    "IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET",
+    "IPDS_RE_PRESERVATION_COGNITO_TOKEN_URL",
+)
+
+
+def missing_cognito_settings() -> list[str]:
+    """Names (never values) of the required Cognito variables that are unset or blank."""
+    return [name for name in COGNITO_REQUIRED_ENV if not (_env_str(name) or "").strip()]
+
+
+def ensure_cognito_settings() -> None:
+    """Fail fast, at startup, when the Cognito settings are not configured."""
+    missing = missing_cognito_settings()
+    if missing:
+        raise IPDSExtensionError(
+            "IPDS signature extension is not configured: missing environment variable(s) " + ", ".join(missing)
+        )
 
 
 def fetch_cognito_token(logger=None, timeout: int | None = None) -> str | None:
@@ -371,15 +397,15 @@ def fetch_cognito_token(logger=None, timeout: int | None = None) -> str | None:
     if logger is None:
         logger = logging.getLogger(__name__)
 
-    client_id = _env_str("IPDS_RE_PRESERVATION_COGNITO_CLIENT_ID", _DEFAULT_COGNITO_CLIENT_ID)
-    client_secret = _env_str(
-        "IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET", _DEFAULT_COGNITO_CLIENT_SECRET
-    )
-    token_url = _env_str("IPDS_RE_PRESERVATION_COGNITO_TOKEN_URL", _DEFAULT_COGNITO_TOKEN_URL)
-    scope = _env_str("IPDS_RE_PRESERVATION_COGNITO_SCOPE", _DEFAULT_COGNITO_SCOPE)
-
-    if not client_id or not client_secret or not token_url:
+    missing = missing_cognito_settings()
+    if missing:
+        logger.error("[ipds] Cognito is not configured, missing: %s", ", ".join(missing))
         return None
+
+    client_id = _env_str("IPDS_RE_PRESERVATION_COGNITO_CLIENT_ID")
+    client_secret = _env_str("IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET")
+    token_url = _env_str("IPDS_RE_PRESERVATION_COGNITO_TOKEN_URL")
+    scope = _env_str("IPDS_RE_PRESERVATION_COGNITO_SCOPE", _DEFAULT_COGNITO_SCOPE)
 
     now = time.time()
     with _cognito_token_lock:

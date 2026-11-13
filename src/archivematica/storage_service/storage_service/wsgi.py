@@ -23,6 +23,9 @@ from django.core.wsgi import get_wsgi_application
 
 django.setup()
 from common.startup import startup  # noqa: E402
+from archivematica.storage_service.locations.models.ipds_extension import (  # noqa: E402
+    ensure_cognito_settings,
+)
 
 SITE_ROOT = str(pathlib.Path(__file__).resolve().parent.parent)
 path.append(SITE_ROOT)
@@ -37,6 +40,8 @@ os.environ.setdefault(
     "archivematica.storage_service.storage_service.settings.production",
 )
 
+# IPDS-902: no default credentials in the code; refuse to start when the Cognito settings are missing.
+ensure_cognito_settings()
 startup()
 
 # This application object is used by any WSGI server configured to use this

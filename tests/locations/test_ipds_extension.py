@@ -432,3 +432,76 @@ def test_the_most_recent_timestamp_rule_falls_back_without_dated_timestamps(ext)
     assert ext.extract_extension_period_max(report, latest_timestamp=True) == datetime.datetime(
         2031, 1, 1, tzinfo=datetime.timezone.utc
     )
+
+
+# --- IPDS-902: the Cognito credentials come only from the deployment, never from the code -----------------------
+
+
+_COGNITO_ENV = (
+    "IPDS_RE_PRESERVATION_COGNITO_CLIENT_ID",
+    "IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET",
+    "IPDS_RE_PRESERVATION_COGNITO_TOKEN_URL",
+)
+
+
+def _set_cognito_env(monkeypatch, **overrides):
+    values = {name: "test-value-" + name[-8:] for name in _COGNITO_ENV}
+    values.update(overrides)
+    for name, value in values.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def test_startup_check_passes_when_the_three_settings_are_present(ext, monkeypatch):
+    _set_cognito_env(monkeypatch)
+
+    assert ext.missing_cognito_settings() == []
+    ext.ensure_cognito_settings()
+
+
+@pytest.mark.parametrize("name", _COGNITO_ENV)
+def test_startup_check_fails_naming_the_missing_setting(ext, monkeypatch, name):
+    _set_cognito_env(monkeypatch, **{name: None})
+
+    with pytest.raises(ext.IPDSExtensionError) as error:
+        ext.ensure_cognito_settings()
+
+    assert name in str(error.value)
+    assert ext.missing_cognito_settings() == [name]
+
+
+def test_a_blank_setting_counts_as_missing(ext, monkeypatch):
+    _set_cognito_env(monkeypatch, IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET="   ")
+
+    assert ext.missing_cognito_settings() == ["IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET"]
+
+
+def test_the_error_names_the_variables_but_never_a_value(ext, monkeypatch):
+    _set_cognito_env(
+        monkeypatch,
+        IPDS_RE_PRESERVATION_COGNITO_CLIENT_ID="visible-id-value",
+        IPDS_RE_PRESERVATION_COGNITO_CLIENT_SECRET=None,
+    )
+
+    with pytest.raises(ext.IPDSExtensionError) as error:
+        ext.ensure_cognito_settings()
+
+    assert "visible-id-value" not in str(error.value)
+
+
+def test_without_settings_no_token_is_requested_and_nothing_is_sent(ext, monkeypatch, caplog):
+    _set_cognito_env(monkeypatch, **{name: None for name in _COGNITO_ENV})
+
+    with mock.patch.object(ext.requests, "post") as post:
+        token = ext.fetch_cognito_token(logger=logging.getLogger("t902"))
+
+    assert token is None
+    post.assert_not_called()
+
+
+def test_the_module_carries_no_default_credential(ext):
+    assert not hasattr(ext, "_DEFAULT_COGNITO_CLIENT_ID")
+    assert not hasattr(ext, "_DEFAULT_COGNITO_CLIENT_SECRET")
+    assert not hasattr(ext, "_DEFAULT_COGNITO_TOKEN_URL")
